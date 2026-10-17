@@ -1,16 +1,23 @@
 // DD2 Co-op: launcher. Instala/atualiza o mod pela última Release do GitHub e abre o jogo.
 //
-// 1. Acha o Dragon's Dogma 2, nesta ordem: pasta salva (%APPDATA%\DD2Coop\launcher.ini), pasta
+// 1. Launcher: se a Release tem DD2Coop_Launcher.exe com SHA256 (DD2Coop_Launcher.exe.sha256)
+//    diferente do próprio, baixa, confere, troca o próprio .exe (o antigo vira .old) e reabre.
+// 2. Acha o Dragon's Dogma 2, nesta ordem: pasta salva (%APPDATA%\DD2Coop\launcher.ini), pasta
 //    do próprio launcher, bibliotecas da Steam (registro + libraryfolders.vdf + installdir do
 //    appmanifest_2054970.acf). Na primeira vez confirma a pasta achada; sem achar, ou abrindo
 //    com Shift apertado (ou --pasta), pede a pasta. Toda pasta precisa ter DD2.exe.
-// 2. Recusa mexer com o jogo aberto (o DLL do plugin não troca com o jogo rodando).
-// 3. REFramework: se faltar dinput8.dll, baixa a nightly fixada (kRefUrl) e confere o SHA256.
-// 4. Mod: lê a última Release de kRepo; versão diferente da instalada
-//    (reframework\data\dd2coop_version.txt) baixa DD2Coop.zip, confere com DD2Coop.zip.sha256
-//    e instala por cima (scripts dd2coop_*.lua antigos são apagados antes, para não sobrar
-//    script renomeado/removido). Arquivos de estado do mod em reframework\data ficam.
-// 5. Abre o jogo pela Steam.
+// 3. Recusa mexer com o jogo aberto (o DLL do plugin não troca com o jogo rodando).
+// 4. REFramework: versão pedida pela Release (reframework.txt: url= e sha256= do zip; sem ele,
+//    kRefUrl/kRefSha). Instala se faltar dinput8.dll ou se o SHA256 instalado (launcher.ini)
+//    for outro; um dinput8.dll que não foi o launcher que pôs vira dinput8.dll.bak_dd2coop.
+// 5. Mod: versão diferente da instalada (reframework\data\dd2coop_version.txt) baixa
+//    DD2Coop.zip, confere com DD2Coop.zip.sha256 e instala por cima (scripts dd2coop_*.lua
+//    antigos são apagados antes, para não sobrar script renomeado/removido). Arquivos de
+//    estado do mod em reframework\data ficam.
+// 6. Abre o jogo pela Steam e espera ele fechar. Versão (mod e REFramework) que rodou 10 min
+//    ou fechou sem crash vira "boa". Crash (reframework_crash.dmp novo ou código de exceção)
+//    antes disso com versão ainda não boa: volta para a última boa e marca a nova como ruim
+//    (não reinstala até sair outra).
 // Sem internet ou sem Release: abre o jogo com o que já está instalado.
 
 #include <windows.h>
@@ -21,6 +28,7 @@
 #include <psapi.h>
 
 #include <cstdio>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -28,10 +36,12 @@ namespace {
 
 const wchar_t* kTitle = L"DD2 Co-op";
 const char* kRepo = "roxopls/dd2_coop";
-// REFramework nightly usada no desenvolvimento (plugin API 1.15)
-const wchar_t* kRefUrl = L"https://github.com/praydog/REFramework-nightly/releases/download/"
-    L"nightly-01432-d052e8fd3fd41d0a1a33394fcf6e6c19be39b1ee/REFramework.zip";
+// REFramework padrão, quando a Release não traz reframework.txt (plugin API 1.15)
+const char* kRefUrl = "https://github.com/praydog/REFramework-nightly/releases/download/"
+    "nightly-01432-d052e8fd3fd41d0a1a33394fcf6e6c19be39b1ee/REFramework.zip";
 const char* kRefSha = "27376e1da177ddcde9c46b3541bdc6fa1ad54a11d0cab9f7782eff0481455e94";
+const ULONGLONG kGoodAfterMs = 10 * 60 * 1000;  // rodou isso sem crash: versão boa
+HANDLE g_mutex = nullptr;  // um launcher por vez
 
 std::wstring widen(const std::string& s) {
     if (s.empty()) return {};
@@ -39,6 +49,14 @@ std::wstring widen(const std::string& s) {
     std::wstring w(n, L'\0');
     MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), w.data(), n);
     return w;
+}
+
+std::string narrow(const std::wstring& w) {
+    if (w.empty()) return {};
+    int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), nullptr, 0, nullptr, nullptr);
+    std::string s(n, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), s.data(), n, nullptr, nullptr);
+    return s;
 }
 
 void message(const std::wstring& text, UINT icon = MB_ICONINFORMATION) {
@@ -144,6 +162,91 @@ std::string asset_url(const std::string& release, const std::string& name) {
     return {};
 }
 
+// "latest" ou "tags/<tag>"
+bool get_release(const std::string& which, std::string& out) {
+    return http_get(widen(std::string("https://api.github.com/repos/") + kRepo + "/releases/" + which), out) &&
+        !json_str(out, "tag_name").empty();
+}
+
+// texto de um arquivo da Release (o .sha256 vem só com os 64 hex)
+std::string asset_text(const std::string& release, const std::string& name) {
+    const std::string url = asset_url(release, name);
+    std::string s;
+    if (url.empty() || !http_get(widen(url), s)) return {};
+    return trim(s);
+}
+
+// linhas chave=valor
+using Kv = std::map<std::string, std::string>;
+Kv parse_kv(const std::string& text) {
+    Kv kv;
+    size_t at = 0;
+    while (at < text.size()) {
+        size_t end = text.find('\n', at);
+        if (end == std::string::npos) end = text.size();
+        const std::string line = trim(text.substr(at, end - at));
+        const size_t eq = line.find('=');
+        if (eq != std::string::npos) kv[line.substr(0, eq)] = line.substr(eq + 1);
+        at = end + 1;
+    }
+    return kv;
+}
+
+// estado em %APPDATA%\DD2Coop\launcher.ini (UTF-8):
+//   game=<pasta>, mod=<tag instalada>, mod_good=, mod_bad=, ref_url=, ref_sha=, ref_good_url=,
+//   ref_good_sha=, ref_bad=
+std::wstring config_dir() {
+    wchar_t* app = nullptr;
+    std::wstring d;
+    if (SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &app) == S_OK) d = std::wstring(app) + L"\\DD2Coop";
+    CoTaskMemFree(app);
+    return d;
+}
+
+Kv load_state() {
+    const std::wstring d = config_dir();
+    return d.empty() ? Kv{} : parse_kv(read_file(d + L"\\launcher.ini"));
+}
+
+void save_state(const Kv& st) {
+    const std::wstring d = config_dir();
+    if (d.empty()) return;
+    CreateDirectoryW(d.c_str(), nullptr);
+    std::string s;
+    for (const auto& [k, v] : st) if (!v.empty()) s += k + "=" + v + "\n";
+    write_file(d + L"\\launcher.ini", s);
+}
+
+std::wstring self_path() {
+    wchar_t self[MAX_PATH];
+    GetModuleFileNameW(nullptr, self, MAX_PATH);
+    return self;
+}
+
+// troca o próprio .exe pelo da Release; true = reabriu a versão nova (sair)
+bool self_update(const std::string& release, const std::wstring& cmd) {
+    const std::string want = asset_text(release, "DD2Coop_Launcher.exe.sha256").substr(0, 64);
+    const std::wstring self = self_path(), old = self + L".old";
+    if (want.size() != 64 || sha256_hex(read_file(self)) == want) return false;
+    std::string exe;
+    const std::string url = asset_url(release, "DD2Coop_Launcher.exe");
+    if (url.empty() || !http_get(widen(url), exe) || sha256_hex(exe) != want) return false;
+    DeleteFileW(old.c_str());
+    // o .exe rodando pode ser renomeado, não sobrescrito
+    if (!MoveFileExW(self.c_str(), old.c_str(), MOVEFILE_REPLACE_EXISTING)) return false;
+    if (!write_file(self, exe)) { MoveFileExW(old.c_str(), self.c_str(), MOVEFILE_REPLACE_EXISTING); return false; }
+    // solta o "um launcher por vez" para a versão nova abrir
+    ReleaseMutex(g_mutex);
+    CloseHandle(g_mutex);
+    std::wstring line = L"\"" + self + L"\" " + cmd + L" --atualizado";
+    STARTUPINFOW si{ sizeof(si) };
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessW(nullptr, line.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) return false;
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    return true;
+}
+
 std::wstring reg_string(HKEY root, const wchar_t* key, const wchar_t* value) {
     wchar_t buf[MAX_PATH];
     DWORD size = sizeof(buf);
@@ -152,14 +255,6 @@ std::wstring reg_string(HKEY root, const wchar_t* key, const wchar_t* value) {
 }
 
 bool is_game(const std::wstring& dir) { return !dir.empty() && exists(dir + L"\\DD2.exe"); }
-
-std::string narrow(const std::wstring& w) {
-    if (w.empty()) return {};
-    int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), nullptr, 0, nullptr, nullptr);
-    std::string s(n, '\0');
-    WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), s.data(), n, nullptr, nullptr);
-    return s;
-}
 
 // valores de "chave"		"valor" num .vdf/.acf da Steam (\\ vira \)
 std::vector<std::string> vdf_values(const std::string& vdf, const std::string& key) {
@@ -178,36 +273,9 @@ std::vector<std::string> vdf_values(const std::string& vdf, const std::string& k
     return out;
 }
 
-// pasta escolhida guardada em %APPDATA%\DD2Coop\launcher.ini ("game=<pasta>", UTF-8)
-std::wstring config_dir() {
-    wchar_t* app = nullptr;
-    std::wstring d;
-    if (SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &app) == S_OK) d = std::wstring(app) + L"\\DD2Coop";
-    CoTaskMemFree(app);
-    return d;
-}
-
-std::wstring saved_game() {
-    const std::wstring d = config_dir();
-    if (d.empty()) return {};
-    const std::string ini = read_file(d + L"\\launcher.ini");
-    const size_t at = ini.find("game=");
-    if (at == std::string::npos) return {};
-    return widen(trim(ini.substr(at + 5, ini.find('\n', at) - at - 5)));
-}
-
-void save_game(const std::wstring& dir) {
-    const std::wstring d = config_dir();
-    if (d.empty()) return;
-    CreateDirectoryW(d.c_str(), nullptr);
-    write_file(d + L"\\launcher.ini", "game=" + narrow(dir) + "\n");
-}
-
 // procura sem perguntar: pasta do launcher, depois as bibliotecas da Steam
 std::wstring find_game() {
-    wchar_t self[MAX_PATH];
-    GetModuleFileNameW(nullptr, self, MAX_PATH);
-    std::wstring here = self;
+    std::wstring here = self_path();
     here = here.substr(0, here.find_last_of(L"\\/"));
     if (is_game(here)) return here;
     std::wstring steam = reg_string(HKEY_CURRENT_USER, L"Software\\Valve\\Steam", L"SteamPath");
@@ -242,43 +310,47 @@ std::wstring pick_game(const std::wstring& start) {
         const bool ok = SHGetPathFromIDListW(id, path);
         CoTaskMemFree(id);
         if (ok && is_game(path)) return path;
-        MessageBoxW(nullptr, L"Essa pasta nao tem o DD2.exe. Escolha a pasta do jogo.", kTitle, MB_OK | MB_ICONWARNING);
+        message(L"Essa pasta nao tem o DD2.exe. Escolha a pasta do jogo.", MB_ICONWARNING);
     }
 }
 
 // pasta do jogo: salva > achada (confirma na 1ª vez) > escolhida; vazio = cancelou
-std::wstring resolve_game(bool choose) {
-    std::wstring dir = saved_game();
+std::wstring resolve_game(Kv& st, bool choose) {
+    std::wstring dir = widen(st["game"]);
     if (!choose && is_game(dir)) return dir;
     std::wstring found = find_game();
     if (!choose && !found.empty()) {
         const int r = MessageBoxW(nullptr, (L"Achei o Dragon's Dogma 2 em:\n" + found +
             L"\n\nInstalar o mod nessa pasta?\n(Nao = escolher outra pasta)").c_str(), kTitle, MB_YESNOCANCEL | MB_ICONQUESTION);
         if (r == IDCANCEL) return {};
-        if (r == IDYES) { save_game(found); return found; }
+        if (r == IDYES) dir = found;
+        else dir = pick_game(found);
+    } else {
+        dir = pick_game(is_game(dir) ? dir : found);
     }
-    dir = pick_game(is_game(dir) ? dir : found);
-    if (!dir.empty()) save_game(dir);
+    if (!dir.empty()) { st["game"] = narrow(dir); save_state(st); }
     return dir;
 }
 
-bool game_running() {
-    // só pelo processo DD2.exe: pelo título da janela, a página do jogo na Steam também batia
-    bool found = false;
+// pid do DD2.exe rodando (0 = nenhum); só pelo processo: pelo título da janela, a página do
+// jogo na Steam também batia
+DWORD game_pid() {
     DWORD pids[4096], bytes = 0;
-    if (!EnumProcesses(pids, sizeof(pids), &bytes)) return false;
-    for (DWORD i = 0; i < bytes / sizeof(DWORD) && !found; ++i) {
+    if (!EnumProcesses(pids, sizeof(pids), &bytes)) return 0;
+    for (DWORD i = 0; i < bytes / sizeof(DWORD); ++i) {
         HANDLE p = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pids[i]);
         if (!p) continue;
         wchar_t name[MAX_PATH];
         DWORD n = MAX_PATH;
+        bool found = false;
         if (QueryFullProcessImageNameW(p, 0, name, &n)) {
             std::wstring s = name;
             found = s.size() >= 8 && _wcsicmp(s.c_str() + s.size() - 8, L"\\DD2.exe") == 0;
         }
         CloseHandle(p);
+        if (found) return pids[i];
     }
-    return found;
+    return 0;
 }
 
 // extrai um zip com o tar do Windows (bsdtar, Windows 10+)
@@ -305,14 +377,41 @@ std::wstring temp_dir() {
     return d;
 }
 
-bool install_reframework(const std::wstring& game, std::wstring& err) {
+void remove_tree(const std::wstring& dir) {
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((dir + L"\\*").c_str(), &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            std::wstring name = fd.cFileName;
+            if (name == L"." || name == L"..") continue;
+            std::wstring p = dir + L"\\" + name;
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) remove_tree(p);
+            else DeleteFileW(p.c_str());
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    RemoveDirectoryW(dir.c_str());
+}
+
+// REFramework pedido pela Release (reframework.txt) ou o padrão
+void wanted_ref(const std::string& release, std::string& url, std::string& sha) {
+    Kv kv = parse_kv(release.empty() ? std::string() : asset_text(release, "reframework.txt"));
+    url = kv["url"], sha = kv["sha256"];
+    if (url.empty() || sha.size() != 64) url = kRefUrl, sha = kRefSha;
+}
+
+bool install_reframework(const std::wstring& game, const std::string& url, const std::string& sha,
+                         bool backup_foreign, std::wstring& err) {
     std::string zip;
-    if (!http_get(kRefUrl, zip)) { err = L"nao consegui baixar o REFramework"; return false; }
-    if (sha256_hex(zip) != kRefSha) { err = L"REFramework baixado nao confere (SHA256)"; return false; }
+    if (!http_get(widen(url), zip)) { err = L"nao consegui baixar o REFramework"; return false; }
+    if (sha256_hex(zip) != sha) { err = L"REFramework baixado nao confere (SHA256)"; return false; }
     std::wstring tmp = temp_dir(), path = tmp + L"\\REFramework.zip", out = tmp + L"\\ref";
+    remove_tree(out);
     CreateDirectoryW(out.c_str(), nullptr);
     if (!write_file(path, zip) || !unzip(path, out)) { err = L"falha ao extrair o REFramework"; return false; }
-    if (!CopyFileW((out + L"\\dinput8.dll").c_str(), (game + L"\\dinput8.dll").c_str(), FALSE)) {
+    const std::wstring dll = game + L"\\dinput8.dll";
+    if (backup_foreign && exists(dll)) CopyFileW(dll.c_str(), (dll + L".bak_dd2coop").c_str(), FALSE);
+    if (!CopyFileW((out + L"\\dinput8.dll").c_str(), dll.c_str(), FALSE)) {
         err = L"falha ao copiar dinput8.dll para a pasta do jogo"; return false;
     }
     return true;
@@ -345,78 +444,173 @@ void delete_old_scripts(const std::wstring& game) {
     FindClose(h);
 }
 
-void remove_tree(const std::wstring& dir) {
-    WIN32_FIND_DATAW fd;
-    HANDLE h = FindFirstFileW((dir + L"\\*").c_str(), &fd);
-    if (h != INVALID_HANDLE_VALUE) {
-        do {
-            std::wstring name = fd.cFileName;
-            if (name == L"." || name == L"..") continue;
-            std::wstring p = dir + L"\\" + name;
-            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) remove_tree(p);
-            else DeleteFileW(p.c_str());
-        } while (FindNextFileW(h, &fd));
-        FindClose(h);
-    }
-    RemoveDirectoryW(dir.c_str());
+std::string installed_mod(const std::wstring& game) {
+    if (!exists(game + L"\\reframework\\plugins\\dd2coop_net.dll")) return {};
+    return trim(read_file(game + L"\\reframework\\data\\dd2coop_version.txt"));
 }
 
-// 0 = já atualizado, 1 = atualizado, -1 = erro (err), -2 = sem acesso à Release
-int update_mod(const std::wstring& game, std::wstring& version, std::wstring& err) {
-    std::string release;
-    std::string api = std::string("https://api.github.com/repos/") + kRepo + "/releases/latest";
-    if (!http_get(widen(api), release)) return -2;
-    const std::string tag = json_str(release, "tag_name");
-    if (tag.empty()) return -2;
-    version = widen(tag);
-    const std::wstring vfile = game + L"\\reframework\\data\\dd2coop_version.txt";
-    if (trim(read_file(vfile)) == tag && exists(game + L"\\reframework\\plugins\\dd2coop_net.dll")) return 0;
-    const std::string zip_url = asset_url(release, "DD2Coop.zip"), sha_url = asset_url(release, "DD2Coop.zip.sha256");
-    if (zip_url.empty() || sha_url.empty()) { err = L"Release sem DD2Coop.zip/.sha256"; return -1; }
-    std::string zip, sha;
-    if (!http_get(widen(sha_url), sha) || !http_get(widen(zip_url), zip)) { err = L"falha ao baixar a versao " + version; return -1; }
-    if (sha256_hex(zip) != trim(sha).substr(0, 64)) { err = L"pacote baixado nao confere (SHA256); nada foi instalado"; return -1; }
+// instala o pacote de uma Release
+bool install_mod(const std::wstring& game, const std::string& release, std::wstring& err) {
+    const std::wstring version = widen(json_str(release, "tag_name"));
+    const std::string zip_url = asset_url(release, "DD2Coop.zip");
+    const std::string sha = asset_text(release, "DD2Coop.zip.sha256").substr(0, 64);
+    if (zip_url.empty() || sha.size() != 64) { err = L"Release " + version + L" sem DD2Coop.zip/.sha256"; return false; }
+    std::string zip;
+    if (!http_get(widen(zip_url), zip)) { err = L"falha ao baixar a versao " + version; return false; }
+    if (sha256_hex(zip) != sha) { err = L"pacote baixado nao confere (SHA256); nada foi instalado"; return false; }
     std::wstring tmp = temp_dir(), path = tmp + L"\\DD2Coop.zip", out = tmp + L"\\mod";
     remove_tree(out);
     CreateDirectoryW(out.c_str(), nullptr);
-    if (!write_file(path, zip) || !unzip(path, out)) { err = L"falha ao extrair o pacote"; return -1; }
-    if (!exists(out + L"\\reframework\\plugins\\dd2coop_net.dll")) { err = L"pacote incompleto"; return -1; }
+    if (!write_file(path, zip) || !unzip(path, out)) { err = L"falha ao extrair o pacote"; return false; }
+    if (!exists(out + L"\\reframework\\plugins\\dd2coop_net.dll")) { err = L"pacote incompleto"; return false; }
     delete_old_scripts(game);
-    if (!copy_tree(out, game)) { err = L"falha ao copiar arquivos para a pasta do jogo"; return -1; }
-    return 1;
+    if (!copy_tree(out, game)) { err = L"falha ao copiar arquivos para a pasta do jogo"; return false; }
+    return true;
+}
+
+ULONGLONG file_time(const std::wstring& p) {
+    WIN32_FILE_ATTRIBUTE_DATA a;
+    if (!GetFileAttributesExW(p.c_str(), GetFileExInfoStandard, &a)) return 0;
+    return ((ULONGLONG)a.ftLastWriteTime.dwHighDateTime << 32) | a.ftLastWriteTime.dwLowDateTime;
+}
+
+ULONGLONG now_time() {
+    FILETIME ft;
+    GetSystemTimeAsFileTime(&ft);
+    return ((ULONGLONG)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
+}
+
+// espera o jogo abrir (até 3 min) e fechar; false = não abriu. A Steam pode reabrir o DD2.exe
+// logo em seguida: só conta como fechado se nenhum aparecer em 10 s.
+bool watch_game(ULONGLONG& ran_ms, DWORD& code) {
+    DWORD pid = 0;
+    for (int i = 0; i < 180 && !(pid = game_pid()); ++i) Sleep(1000);
+    if (!pid) return false;
+    const ULONGLONG start = GetTickCount64();
+    code = 0;
+    while (pid) {
+        HANDLE p = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+        if (p) {
+            WaitForSingleObject(p, INFINITE);
+            GetExitCodeProcess(p, &code);
+            CloseHandle(p);
+        } else {
+            Sleep(1000);
+        }
+        pid = 0;
+        for (int i = 0; i < 10 && !(pid = game_pid()); ++i) Sleep(1000);
+    }
+    ran_ms = GetTickCount64() - start;
+    return true;
+}
+
+// depois do jogo fechar: marca a versão como boa ou volta para a última boa
+void after_game(const std::wstring& game, Kv& st, ULONGLONG launched) {
+    ULONGLONG ran = 0;
+    DWORD code = 0;
+    if (!watch_game(ran, code)) return;
+    const bool crashed = file_time(game + L"\\reframework_crash.dmp") > launched || code >= 0xC0000000;
+    if (!crashed || ran >= kGoodAfterMs) {
+        st["mod_good"] = st["mod"];
+        st["ref_good_url"] = st["ref_url"], st["ref_good_sha"] = st["ref_sha"];
+        save_state(st);
+        return;
+    }
+    const bool mod_new = !st["mod"].empty() && st["mod"] != st["mod_good"];
+    const bool ref_new = !st["ref_sha"].empty() && st["ref_sha"] != st["ref_good_sha"];
+    if (!mod_new && !ref_new) return;  // crash com versão que já funcionou: não é da atualização
+    std::wstring done, err;
+    if (mod_new && !st["mod_good"].empty()) {
+        std::string rel;
+        if (get_release("tags/" + st["mod_good"], rel) && install_mod(game, rel, err)) {
+            done += L"\nmod: " + widen(st["mod"]) + L" -> " + widen(st["mod_good"]);
+            st["mod_bad"] = st["mod"], st["mod"] = st["mod_good"];
+        }
+    }
+    if (ref_new && !st["ref_good_sha"].empty() &&
+        install_reframework(game, st["ref_good_url"], st["ref_good_sha"], false, err)) {
+        done += L"\nREFramework voltou para a versao anterior";
+        st["ref_bad"] = st["ref_sha"], st["ref_url"] = st["ref_good_url"], st["ref_sha"] = st["ref_good_sha"];
+    }
+    save_state(st);
+    if (!done.empty()) {
+        message(L"O jogo crashou logo depois da atualizacao. Voltei para a versao que funcionava:" + done +
+            L"\n\nA versao nova nao sera instalada de novo ate sair outra.", MB_ICONWARNING);
+    } else {
+        message(L"O jogo crashou logo depois da atualizacao e nao ha versao anterior conhecida para voltar." +
+            (err.empty() ? std::wstring() : L"\n" + err), MB_ICONWARNING);
+    }
 }
 
 }  // namespace
 
-int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR cmd, int) {
+int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR cmd_line, int) {
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    const std::wstring cmd = cmd_line ? cmd_line : L"";
+    DeleteFileW((self_path() + L".old").c_str());
+    // um launcher por vez (o anterior pode estar esperando o jogo fechar)
+    g_mutex = CreateMutexW(nullptr, TRUE, L"Local\\DD2CoopLauncher");
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        message(L"O launcher ja esta aberto (ele espera o jogo fechar para conferir crash).", MB_ICONWARNING);
+        return 1;
+    }
+    std::string release;
+    const bool online = get_release("latest", release);
+    if (online && cmd.find(L"--atualizado") == std::wstring::npos && self_update(release, cmd)) return 0;
+
+    Kv st = load_state();
     // Shift apertado ao abrir, ou --pasta: escolher outra pasta do jogo
-    const bool choose = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0 || (cmd && wcsstr(cmd, L"--pasta"));
-    const std::wstring game = resolve_game(choose);
+    const bool choose = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0 || cmd.find(L"--pasta") != std::wstring::npos;
+    const std::wstring game = resolve_game(st, choose);
     if (game.empty()) {
         message(L"Pasta do Dragon's Dogma 2 nao escolhida; nada foi instalado.", MB_ICONWARNING);
         return 1;
     }
-    if (game_running()) {
+    if (game_pid()) {
         message(L"Feche o Dragon's Dogma 2 antes de abrir o launcher.", MB_ICONWARNING);
         return 1;
     }
-    std::wstring err;
-    if (!exists(game + L"\\dinput8.dll") && !install_reframework(game, err)) {
-        message(L"REFramework: " + err, MB_ICONERROR);
-        return 1;
+
+    std::wstring err, notes;
+    std::string ref_url, ref_sha;
+    wanted_ref(online ? release : std::string(), ref_url, ref_sha);
+    const bool has_dll = exists(game + L"\\dinput8.dll");
+    // sem internet não troca um REFramework que já está lá
+    const bool ref_wanted = !has_dll || (online && st["ref_sha"] != ref_sha && st["ref_bad"] != ref_sha);
+    if (ref_wanted) {
+        if (install_reframework(game, ref_url, ref_sha, st["ref_sha"].empty(), err)) {
+            st["ref_url"] = ref_url, st["ref_sha"] = ref_sha;
+            save_state(st);
+            if (has_dll) notes += L"\nREFramework atualizado.";
+        } else if (!has_dll) {
+            message(L"REFramework: " + err, MB_ICONERROR);
+            return 1;
+        } else {
+            message(L"REFramework: " + err + L"\nO jogo vai abrir com o REFramework instalado.", MB_ICONWARNING);
+        }
     }
-    std::wstring version;
-    const int r = update_mod(game, version, err);
-    if (r == -1) {
-        message(L"Atualizacao falhou: " + err + L"\nO jogo vai abrir com a versao instalada.", MB_ICONWARNING);
-    } else if (r == -2 && !exists(game + L"\\reframework\\plugins\\dd2coop_net.dll")) {
+
+    const std::string tag = online ? json_str(release, "tag_name") : std::string();
+    std::string have = installed_mod(game);
+    if (!have.empty() && st["mod"] != have) { st["mod"] = have; save_state(st); }
+    if (!tag.empty() && tag != have && tag != st["mod_bad"]) {
+        if (install_mod(game, release, err)) {
+            st["mod"] = tag;
+            save_state(st);
+            notes += L"\nDD2 Co-op atualizado para " + widen(tag) + L".";
+        } else {
+            message(L"Atualizacao falhou: " + err + L"\nO jogo vai abrir com a versao instalada.", MB_ICONWARNING);
+        }
+    } else if (tag.empty() && have.empty()) {
         message(L"Sem acesso ao GitHub e o mod nao esta instalado.", MB_ICONERROR);
         return 1;
-    } else if (r == 1) {
-        message(L"DD2 Co-op atualizado para " + version + L" em:\n" + game +
-            L"\n\nPara trocar a pasta, abra o launcher segurando Shift.");
     }
+    if (!notes.empty()) {
+        message(notes.substr(1) + L"\n\nPasta: " + game + L"\nPara trocar a pasta, abra o launcher segurando Shift.");
+    }
+
+    const ULONGLONG launched = now_time();
     ShellExecuteW(nullptr, L"open", L"steam://rungameid/2054970", nullptr, nullptr, SW_SHOWNORMAL);
+    after_game(game, st, launched);
     return 0;
 }

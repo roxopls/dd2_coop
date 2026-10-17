@@ -1,7 +1,8 @@
 name: build
 
 # Todo push: compila e testa. Tag v* (ex.: v0.5.0): também publica a Release com o pacote
-# (DD2Coop.zip) e o SHA256 dele, que o launcher confere antes de instalar.
+# (DD2Coop.zip) e o SHA256 dele, que o launcher confere antes de instalar, o launcher com o SHA256
+# dele (auto-atualização) e reframework.txt (versão do REFramework que o mod pede).
 on:
   push:
     branches: [main]
@@ -51,6 +52,8 @@ jobs:
           sha256sum DD2Coop.zip | cut -d' ' -f1 > DD2Coop.zip.sha256
           cat DD2Coop.zip.sha256
           cp build/DD2Coop_Launcher.exe .
+          sha256sum DD2Coop_Launcher.exe | cut -d' ' -f1 > DD2Coop_Launcher.exe.sha256
+          cp launcher/reframework.txt .
 
       - uses: actions/upload-artifact@v4
         with:
@@ -59,6 +62,8 @@ jobs:
             DD2Coop.zip
             DD2Coop.zip.sha256
             DD2Coop_Launcher.exe
+            DD2Coop_Launcher.exe.sha256
+            reframework.txt
 
       - name: Release
         if: startsWith(github.ref, 'refs/tags/v')
@@ -68,3 +73,5 @@ jobs:
             DD2Coop.zip
             DD2Coop.zip.sha256
             DD2Coop_Launcher.exe
+            DD2Coop_Launcher.exe.sha256
+            reframework.txt

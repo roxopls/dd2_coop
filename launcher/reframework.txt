@@ -1,0 +1,2 @@
+url=https://github.com/praydog/REFramework-nightly/releases/download/nightly-01432-d052e8fd3fd41d0a1a33394fcf6e6c19be39b1ee/REFramework.zip
+sha256=27376e1da177ddcde9c46b3541bdc6fa1ad54a11d0cab9f7782eff0481455e94
