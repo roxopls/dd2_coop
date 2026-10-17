@@ -1,0 +1,14 @@
+# compilação e pacotes
+build/
+dist/
+*.dll
+*.exe
+*.zip
+
+# saves e notas locais (rede interna)
+save_backup/
+PROGRESS.txt
+
+# Python
+__pycache__/
+*.pyc
