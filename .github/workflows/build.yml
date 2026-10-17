@@ -50,6 +50,7 @@ jobs:
           (cd pkg && zip -qr ../DD2Coop.zip .)
           sha256sum DD2Coop.zip | cut -d' ' -f1 > DD2Coop.zip.sha256
           cat DD2Coop.zip.sha256
+          cp build/DD2Coop_Launcher.exe .
 
       - uses: actions/upload-artifact@v4
         with:
@@ -57,6 +58,7 @@ jobs:
           path: |
             DD2Coop.zip
             DD2Coop.zip.sha256
+            DD2Coop_Launcher.exe
 
       - name: Release
         if: startsWith(github.ref, 'refs/tags/v')
@@ -65,3 +67,4 @@ jobs:
           files: |
             DD2Coop.zip
             DD2Coop.zip.sha256
+            DD2Coop_Launcher.exe
