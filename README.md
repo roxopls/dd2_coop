@@ -22,7 +22,7 @@ Em desenvolvimento. Use por sua conta e risco.
 ## Estado atual
 
 - Ainda não funciona a sincronização de quest
-- Fases Inicial de testes de sincronização e animações
+- Fase Inicial de testes de sincronização e animações de jogadores
 - Fase Inicial de sincronização de inimigos e NPCs
 
 ## Compilar
