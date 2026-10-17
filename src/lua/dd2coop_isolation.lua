@@ -72,6 +72,182 @@ for _, m in ipairs(td and td:get_methods() or {}) do
     end
 end
 
+-- Contexto (registro salvo de cada personagem): ao mudar de área o CharacterManager.collectContext
+-- chama <collectContext>b__0(i) para cada charaList[i]; a cópia não tem registro próprio e o jogo
+-- lia memória inválida (crash saindo da cidade com a cópia para trás, 2026-10-17). Cópia pulada.
+do
+    local td = sdk.find_type_definition("app.CharacterManager.<>c__DisplayClass334_0")
+    local m = td and td:get_method("<collectContext>b__0")
+    if m then
+        sdk.hook(m, function(args)
+            local set = clone_addresses()
+            if not set then return end
+            local ok, skip = pcall(function()
+                local closure = sdk.to_managed_object(args[2])
+                local list = closure:get_field("charaList")
+                local ch = list:call("get_Item", sdk.to_int64(args[3]) & 0xFFFFFFFF)
+                return ch ~= nil and set[ch:get_address()] == true
+            end)
+            if ok and skip then
+                M.counts.collectContext = (M.counts.collectContext or 0) + 1
+                M.total = M.total + 1
+                return sdk.PreHookResult.SKIP_ORIGINAL
+            end
+        end, function(r) return r end)
+        M.hooks = M.hooks + 1
+    end
+end
+
+-- Peso: com a cópia no mundo o ItemManager.getWeightLimit do Arisen (por Character ou por
+-- CharacterID) passa a ler o status da cópia (nível 1: limite 35 em vez de 61,65) e o jogador
+-- fica sobrecarregado (2026-10-17). Enquanto houver cópia, devolve o limite do jogador guardado
+-- de quando não havia cópia.
+do
+    local ARISEN_ID = 2891076981
+    local td = sdk.find_type_definition("app.ItemManager")
+    local limit_by_char = td and td:get_method("getWeightLimit(app.Character)")
+    local frame = 0
+    re.on_pre_application_entry("LateUpdateBehavior", function()
+        frame = frame + 1
+        if frame % 60 ~= 0 or clone_addresses() then return end
+        pcall(function()
+            local me = sdk.get_managed_singleton("app.CharacterManager"):call("get_ManualPlayer")
+            local im = sdk.get_managed_singleton("app.ItemManager")
+            if me and im then M.weight_limit = limit_by_char:call(im, me) end
+        end)
+    end)
+    for _, sig in ipairs({ "getWeightLimit(app.Character)", "getWeightLimit(app.CharacterID)" }) do
+        local m = td and td:get_method(sig)
+        if m then
+            local by_id = sig:find("CharacterID") ~= nil
+            local replaced = false
+            sdk.hook(m, function(args)
+                replaced = false
+                if not M.weight_limit or not clone_addresses() then return end
+                local ok, arisen = pcall(function()
+                    if by_id then return (sdk.to_int64(args[3]) & 0xFFFFFFFF) == ARISEN_ID end
+                    local ch = sdk.to_managed_object(args[3])
+                    return ch ~= nil and ch:call("get_CharaID") == ARISEN_ID
+                end)
+                if ok and arisen then
+                    replaced = true
+                    return sdk.PreHookResult.SKIP_ORIGINAL
+                end
+            end, function(r)
+                if replaced then
+                    replaced = false
+                    M.counts.weightLimit = (M.counts.weightLimit or 0) + 1
+                    return sdk.float_to_ptr(M.weight_limit)
+                end
+                return r
+            end)
+            M.hooks = M.hooks + 1
+        end
+    end
+end
+
+-- Vida e carga: criar a cópia (mesmo CharacterID) recalcula o jogador com o status dela (nível 1):
+-- HitController.OriginalMaxHp foi de 1782 para 500 (cortando a vida e a barra cinza) e
+-- ItemManager.PlayerWeightRank ficou em 4 (sobrecarregado) (2026-10-17). Sem cópia, guarda vida,
+-- barra cinza e vida máxima; com cópia, a cada 30 quadros volta a vida máxima calculada do
+-- próprio status do jogador, recalcula a carga e, logo depois da cópia aparecer, devolve vida e
+-- barra cinza guardadas.
+do
+    local SET_MAX = "setRegionOriginalMaxHp(System.Single, System.Int32, System.Boolean)"
+    local SET_HP = "setHp(System.Single, System.Boolean, System.Int32)"
+    local frame, saved, restore_at = 0, nil, nil
+    local ARISEN_ID = 2891076981
+    local PLAYER_T = sdk.find_type_definition("app.Player"):get_runtime_type()
+    local function calculator()
+        local cm = sdk.get_managed_singleton("app.CharacterManager")
+        local holder = cm:get_field("<PlayerStatusCalculatorHolder>k__BackingField")
+        return holder and holder:get_field("Calculators"):call("get_Item", ARISEN_ID)
+    end
+    -- A cópia nova toma o ManualPlayer e o jogo aponta para ela ManualPlayerHuman,
+    -- ManualPlayerPlayer e o PlayerStatusCalculator do Arisen (Human e contextos: inventário com
+    -- limite 35 e vida 500 do nível 1). O puppet devolve só o ManualPlayer; aqui volta o resto.
+    local function fix_refs(me)
+        local cm = sdk.get_managed_singleton("app.CharacterManager")
+        local hu = me:call("get_Human")
+        if cm:call("get_ManualPlayerHuman") ~= hu then
+            cm:call("set_ManualPlayerHuman", hu)
+            local pl = me:call("get_GameObject"):call("getComponent(System.Type)", PLAYER_T)
+            if pl then cm:call("set_ManualPlayerPlayer", pl) end
+            M.counts.manualHuman = (M.counts.manualHuman or 0) + 1
+        end
+        local calc = calculator()
+        if calc and (calc:get_field("Human") ~= hu or
+                calc:get_field("Param"):get_field("Status") ~= hu:call("get_StatusContext")) then
+            calc:set_field("Human", hu)
+            calc:call("setContexts(app.ContextHolder)", me:call("get_Context"))
+            M.counts.calculator = (M.counts.calculator or 0) + 1
+        end
+        return calc
+    end
+    M.fix_refs = function(me) return pcall(fix_refs, me) end
+    local function my_max(me)
+        local calc = fix_refs(me)
+        if calc then return calc:call("calcMaxHPWithEquipmentAndBuff()") end
+        local hu = me:call("get_Human")
+        return hu:call("get_StatusContext"):call("calcMaxHp", hu:call("get_JobContext"):get_field("CurrentJob"))
+    end
+    re.on_pre_application_entry("LateUpdateBehavior", function()
+        frame = frame + 1
+        if frame % 30 ~= 0 then return end
+        local ok, err = pcall(function()
+            local me = sdk.get_managed_singleton("app.CharacterManager"):call("get_ManualPlayer")
+            if not me then return end
+            local set = clone_addresses()
+            if set and set[me:get_address()] then return end -- controle ainda na cópia (criando)
+            local h = me:call("get_Hit")
+            if not set then
+                saved = { hp = h:call("get_Hp"), reduced = h:call("get_ReducedMaxHp"), max = h:call("get_OriginalMaxHp") }
+                restore_at = nil
+                return
+            end
+            local mx = my_max(me)
+            if mx and mx > 0 and math.abs(h:call("get_OriginalMaxHp") - mx) > 0.5 then
+                h:call(SET_MAX, mx, 0, false)
+                M.counts.maxHp = (M.counts.maxHp or 0) + 1
+            end
+            restore_at = restore_at or frame + 90
+            if saved and frame >= restore_at then
+                local R = _G.dd2coop_revive
+                if not (R and R.downed) and h:call("get_ReducedMaxHp") < saved.reduced - 0.5 then
+                    h:call("setReducedMaxHpValue", saved.reduced)
+                    h:call(SET_HP, math.min(saved.hp, saved.reduced), false, 0)
+                    M.counts.hpRestore = (M.counts.hpRestore or 0) + 1
+                end
+                saved = nil
+            end
+        end)
+        if not ok then M.message = "erro ao manter status: " .. tostring(err) end
+    end)
+    -- a atualização periódica do jogo (ItemManager.updatePlayerWeightRank) volta a carga para a
+    -- da cópia: depois dela, com cópia viva, a carga é refeita pelo personagem do jogador
+    local m = sdk.find_type_definition("app.ItemManager"):get_method("updatePlayerWeightRank")
+    if m then
+        local this
+        sdk.hook(m, function(args) this = args[2] end, function(r)
+            if clone_addresses() then
+                pcall(function()
+                    local im = sdk.to_managed_object(this)
+                    local me = sdk.get_managed_singleton("app.CharacterManager"):call("get_ManualPlayer")
+                    local set = clone_addresses()
+                    if not im or not me or set[me:get_address()] then return end
+                    local rank = im:call("getWeightRank(app.Character)", me)
+                    if im:get_field("PlayerWeightRank") ~= rank then
+                        im:set_field("PlayerWeightRank", rank)
+                        M.counts.weightRank = (M.counts.weightRank or 0) + 1
+                    end
+                end)
+            end
+            return r
+        end)
+        M.hooks = M.hooks + 1
+    end
+end
+
 log.info("[dd2coop_isolation] inventario isolado da copia; hooks=" .. M.hooks)
 
 re.on_draw_ui(function()

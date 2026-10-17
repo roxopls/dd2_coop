@@ -114,6 +114,12 @@ local function spawn()
     if not st.net_status or (tonumber(st.net_status.save_hooks) or 0) == 0 then
         st.info = "protecao nativa indisponivel; atualize o plugin antes de criar a copia"; return
     end
+    -- com os pawns no mundo a cópia passa do limite do grupo e o jogo crasha (dd2coop_party)
+    local party = _G.dd2coop_party
+    if not party or not party.away() then
+        if party then party.send_away() end
+        st.info = "aguardando os pawns sairem; tente de novo em alguns segundos"; return false
+    end
     st.orig = p:add_ref()
     st.avatar_applied = false -- dd2coop_avatar marca true se aplicar o avatar antes da montagem
     st.state = "gerando" -- block saves BEFORE requesting any generated object
@@ -149,6 +155,8 @@ local function settle()
     if man == nil or man:get_address() ~= orig:get_address() then
         cm():call("set_ManualPlayer", orig)
     end
+    -- ManualPlayerHuman/Player e calculador de status também ficam na cópia (dd2coop_isolation)
+    if _G.dd2coop_isolation and _G.dd2coop_isolation.fix_refs then _G.dd2coop_isolation.fix_refs(orig) end
     local mcc = main_camera_controller()
     if mcc then
         local tc = mcc:call("get_TargetCharacter")
@@ -315,7 +323,8 @@ st.confirm_original = function(address)
 end
 
 _G.dd2coop_p2 = st
-st.spawn = function() return pcall(spawn) end
+-- false: não criou (ex.: pawns ainda saindo); a sessão tenta de novo
+st.spawn = function() local ok, r = pcall(spawn); return ok and r ~= false end
 -- sessao (dd2coop_session.lua): o par vem do lobby, nao precisa ser digitado
 st.set_peer = function(id)
     if type(id) ~= "string" or not id:match("^%d+$") then return false end

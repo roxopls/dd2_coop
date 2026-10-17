@@ -72,6 +72,8 @@ end
 local function settle(orig)
     local man = cm():call("get_ManualPlayer")
     if man == nil or man:get_address() ~= orig:get_address() then cm():call("set_ManualPlayer", orig) end
+    -- ManualPlayerHuman/Player e calculador de status também ficam na cópia (dd2coop_isolation)
+    if _G.dd2coop_isolation and _G.dd2coop_isolation.fix_refs then _G.dd2coop_isolation.fix_refs(orig) end
     local mcc = main_camera_controller()
     if mcc then
         local tc = mcc:call("get_TargetCharacter")
@@ -219,7 +221,8 @@ re.on_pre_application_entry("LateUpdateBehavior", function()
         local can_spawn = not M.busy and P and (P.state == "pronto" or P.state == "nenhum") and
             not (_G.dd2coop_loadout and _G.dd2coop_loadout.pending) and
             not (_G.dd2coop_avatar and (_G.dd2coop_avatar.armed or _G.dd2coop_avatar.next_build)) and
-            (P.state == "pronto" or not main)
+            (P.state == "pronto" or not main) and
+            (_G.dd2coop_party and _G.dd2coop_party.away()) -- pawns no mundo + cópia passam do limite do grupo
         if can_spawn then
             for peer in pairs(wanted) do
                 if not slot_of(peer) then
