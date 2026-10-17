@@ -66,6 +66,51 @@ local function update(ui)
     M.shown = shown
 end
 
+-- Mapa grande (app.ui040205): só desenha o Arisen (PnlArisen). Os últimos ícones de uso geral
+-- (MapIcon[31], [30], [29]; o jogo usa o pool a partir do início) viram o ícone de Arisen
+-- (MapIconRef.setupPlIcon, o mesmo do jogador) na posição getIconPos(posição universal) de cada jogador.
+local big_used = {}
+local function update_big(ui)
+    local arr = ui:get_field("MapIcon")
+    if not arr then return end
+    local list = players()
+    local last = arr:get_size() - 1
+    for k = 1, 3 do
+        local i = last - (k - 1)
+        local r = arr:get_element(i)
+        local p = list[k]
+        if r and p then
+            -- o jogo reconfigura a aparência do pool ao abrir o mapa: reaplica sempre
+            r:call("setupPlIcon")
+            big_used[i] = true
+            local xf = p.ch:call("get_GameObject"):call("get_Transform")
+            r:call("set_Position", ui:call("getIconPos(via.Position)", xf:call("get_UniversalPosition")))
+            r:call("set_Rotation", ui:call("getIconRot", yaw_of(xf:call("get_Rotation"))))
+            r:call("setAlpha", p.dead and 0.4 or 1.0)
+            r:call("set_Visible", true)
+        elseif r and big_used[i] then
+            r:call("set_Visible", false)
+            big_used[i] = nil
+        end
+    end
+end
+
+do
+    local bt = sdk.find_type_definition("app.ui040205")
+    local bm = bt and bt:get_method("update")
+    if bm then
+        local this
+        sdk.hook(bm, function(args) this = args[2] end, function(r)
+            local ok, err = pcall(function()
+                local ui = this and sdk.to_managed_object(this)
+                if ui then update_big(ui) end
+            end)
+            if not ok then M.message = "erro no mapa grande: " .. tostring(err) end
+            return r
+        end)
+    end
+end
+
 local td = sdk.find_type_definition("app.ui020301")
 local m = td and td:get_method("updatePawnIcon")
 if m then
