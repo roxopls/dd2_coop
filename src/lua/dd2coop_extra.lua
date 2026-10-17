@@ -170,6 +170,11 @@ local function visibility(slot, status)
     end
 end
 
+function M.clone_of(peer)
+    local s = slot_of(peer)
+    return s and s.clone or nil
+end
+
 function M.set_dead(peer, dead)
     local s = slot_of(peer)
     if s then s.remote_dead = dead end

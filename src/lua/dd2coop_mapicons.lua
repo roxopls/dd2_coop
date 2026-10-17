@@ -16,17 +16,26 @@ local function yaw_of(q)
 end
 
 -- cópias dos outros jogadores: { ch, dead }
+-- caído esperando reviver (dd2coop_revive) também usa o ícone de pawn morto
+local function is_down(peer)
+    local R = _G.dd2coop_revive
+    local r = R and peer and R.remote[peer]
+    return r ~= nil and r.down == true
+end
+
 local function players()
     local out = {}
     local P = _G.dd2coop_p2
     if P and P.state == "pronto" and P.clone then
         local live = P.drawn == true or P.remote_dead == true
-        if live then out[#out + 1] = { ch = P.clone, dead = P.remote_dead == true } end
+        local peer = P.get_peer and P.get_peer()
+        local down = is_down(peer) or is_down("0")
+        if live then out[#out + 1] = { ch = P.clone, dead = P.remote_dead == true or down } end
     end
     local X = _G.dd2coop_extra
     for _, s in ipairs(X and X.slots or {}) do
         if s.state == "pronto" and s.clone and s.active and (s.drawn or s.remote_dead) then
-            out[#out + 1] = { ch = s.clone, dead = s.remote_dead == true }
+            out[#out + 1] = { ch = s.clone, dead = s.remote_dead == true or is_down(s.peer) }
         end
     end
     return out

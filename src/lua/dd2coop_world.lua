@@ -88,7 +88,9 @@ local function my_vitals()
     local function b(n) local ok, v = pcall(function() return p:call(n) end); return ok and v == true end
     local carry = false -- agarrando/carregando alguém (diagnóstico do carregar o outro jogador)
     pcall(function() carry = p:call("get_CatchController"):call("get_IsActive") == true end)
-    return { t = "vitals", dead = b("get_IsDead") or b("get_IsFallDead"), hp = p:call("get_Hp"), carry = carry }
+    local R = _G.dd2coop_revive
+    return { t = "vitals", dead = b("get_IsDead") or b("get_IsFallDead"), hp = p:call("get_Hp"), carry = carry,
+        down = R and R.downed or false }
 end
 
 local function publish(peer, host)
@@ -98,6 +100,8 @@ local function publish(peer, host)
     local data = { seq = M.seq, mode = M.eco and "eco" or "p2p", peer = peer or "", msgs = {} }
     local v = my_vitals()
     if v then data.msgs[#data.msgs + 1] = v end
+    local R = _G.dd2coop_revive
+    for _, m in ipairs(R and R.outgoing() or {}) do data.msgs[#data.msgs + 1] = m end
     if host then -- so o host manda no mundo
         data.msgs[#data.msgs + 1] = { t = "time", day = d, hour = h, minute = mi }
         data.msgs[#data.msgs + 1] = { t = "weather", w = wm:call("get_NowWeatherEnum") }
@@ -125,10 +129,17 @@ local function apply(data, follow_world, sender)
                 s.remote_dead = msg.dead == true
                 log.info("[dd2coop_world] amigo " .. (s.remote_dead and "morreu: jogador 2 escondido" or "voltou: jogador 2 visivel"))
             end
+            if _G.dd2coop_revive then
+                local clone = (not sender or sender == main or sender == "0") and P and P.clone or (X and X.clone_of(sender))
+                _G.dd2coop_revive.on_vitals(sender or "0", msg, clone)
+            end
             if M.remote_carry ~= (msg.carry == true) then
                 M.remote_carry = msg.carry == true
                 log.info("[dd2coop_world] amigo " .. (M.remote_carry and "agarrou/carrega algo" or "soltou"))
             end
+        elseif msg.t == "revive" then
+            local S = _G.dd2coop_session
+            if _G.dd2coop_revive then _G.dd2coop_revive.on_revive(sender, msg, S and S.status and S.status.me) end
         elseif not follow_world then
             -- host: horario/clima/quests do cliente nao valem aqui
         elseif msg.t == "time" and type(msg.day) == "number" and type(msg.hour) == "number" and type(msg.minute) == "number" then
@@ -170,7 +181,8 @@ re.on_pre_application_entry("LateUpdateBehavior", function()
     -- os dois lados publicam (o cliente tambem precisa registrar o par no plugin, senao
     -- o plugin dele rejeita o que chega do host); so o host leva horario/clima/quests
     if role == "host" or role == "cliente" or M.eco then
-        if M.frame % 120 == 0 then pcall(publish, peer, role == "host" or M.eco) end
+        -- urgente (reviver): publica já no próximo segundo
+        if M.frame % 120 == 0 or M.urgent then M.urgent = false; pcall(publish, peer, role == "host" or M.eco) end
     end
     if role == "host" or role == "cliente" or M.eco then
         -- um arquivo por jogador; horário/clima/quests só do host (dono do lobby)

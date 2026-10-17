@@ -233,6 +233,18 @@ recover = function()
     local same = saved_session.instance == st.instance
     if #found == 1 then
         local uncertain = same and saved_session.phase ~= "nenhum" and saved_session.original ~= nil
+        -- recarga do save (morte -> menu -> carregar) destrói a cópia e recria o jogador: se o
+        -- único Arisen vivo é o do controle e não é a cópia registrada, a sessão recomeça do zero
+        -- (a cópia nunca fica sozinha no controle sem ser a do registro)
+        if uncertain and saved_session.phase == "pronto" and saved_session.clone ~= nil and
+            key(found[1]) ~= saved_session.clone and key(found[1]) == key(manual) then
+            st.state, st.orig, st.clone, st.source_idx, cfg.mirror = "nenhum", nil, nil, 1, false
+            remember()
+            write_net_cfg("off")
+            st.info = "copia sumiu com a recarga do save; pronta para criar de novo"
+            log.info("[dd2coop] " .. st.info)
+            return
+        end
         if uncertain then
             st.source_idx, cfg.mirror = 1, false
             if key(found[1]) == saved_session.original and key(st.orig) ~= key(found[1]) then
