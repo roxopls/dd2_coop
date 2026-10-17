@@ -25,5 +25,5 @@ endif()
 # launcher: baixa/atualiza o mod pela Release do GitHub e abre o jogo
 add_executable(DD2Coop_Launcher WIN32 launcher/launcher.cpp)
 target_compile_definitions(DD2Coop_Launcher PRIVATE UNICODE _UNICODE)
-target_link_libraries(DD2Coop_Launcher PRIVATE winhttp bcrypt shell32 psapi advapi32)
+target_link_libraries(DD2Coop_Launcher PRIVATE winhttp bcrypt shell32 ole32 uuid psapi advapi32)
 target_link_options(DD2Coop_Launcher PRIVATE -static -static-libgcc -static-libstdc++ -municode)

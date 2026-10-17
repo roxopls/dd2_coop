@@ -1,7 +1,9 @@
 // DD2 Co-op: launcher. Instala/atualiza o mod pela última Release do GitHub e abre o jogo.
 //
-// 1. Acha o Dragon's Dogma 2 nas bibliotecas da Steam (registro + libraryfolders.vdf) ou na
-//    pasta do próprio launcher.
+// 1. Acha o Dragon's Dogma 2, nesta ordem: pasta salva (%APPDATA%\DD2Coop\launcher.ini), pasta
+//    do próprio launcher, bibliotecas da Steam (registro + libraryfolders.vdf + installdir do
+//    appmanifest_2054970.acf). Na primeira vez confirma a pasta achada; sem achar, ou abrindo
+//    com Shift apertado (ou --pasta), pede a pasta. Toda pasta precisa ter DD2.exe.
 // 2. Recusa mexer com o jogo aberto (o DLL do plugin não troca com o jogo rodando).
 // 3. REFramework: se faltar dinput8.dll, baixa a nightly fixada (kRefUrl) e confere o SHA256.
 // 4. Mod: lê a última Release de kRepo; versão diferente da instalada
@@ -15,6 +17,7 @@
 #include <bcrypt.h>
 #include <winhttp.h>
 #include <shellapi.h>
+#include <shlobj.h>
 #include <psapi.h>
 
 #include <cstdio>
@@ -148,32 +151,115 @@ std::wstring reg_string(HKEY root, const wchar_t* key, const wchar_t* value) {
     return buf;
 }
 
-std::wstring find_game() {
-    wchar_t self[MAX_PATH];
-    GetModuleFileNameW(nullptr, self, MAX_PATH);
-    std::wstring here = self;
-    here = here.substr(0, here.find_last_of(L"\\/"));
-    if (exists(here + L"\\DD2.exe")) return here;
-    std::wstring steam = reg_string(HKEY_CURRENT_USER, L"Software\\Valve\\Steam", L"SteamPath");
-    if (steam.empty()) return {};
-    std::vector<std::wstring> libs{ steam };
-    // libraryfolders.vdf: "path"		"A:\\SteamLibrary"
-    std::string vdf = read_file(steam + L"\\steamapps\\libraryfolders.vdf");
-    for (size_t at = vdf.find("\"path\""); at != std::string::npos; at = vdf.find("\"path\"", at + 1)) {
-        size_t q1 = vdf.find('"', at + 6), q2 = q1 == std::string::npos ? q1 : vdf.find('"', q1 + 1);
+bool is_game(const std::wstring& dir) { return !dir.empty() && exists(dir + L"\\DD2.exe"); }
+
+std::string narrow(const std::wstring& w) {
+    if (w.empty()) return {};
+    int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), nullptr, 0, nullptr, nullptr);
+    std::string s(n, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), s.data(), n, nullptr, nullptr);
+    return s;
+}
+
+// valores de "chave"		"valor" num .vdf/.acf da Steam (\\ vira \)
+std::vector<std::string> vdf_values(const std::string& vdf, const std::string& key) {
+    std::vector<std::string> out;
+    const std::string k = "\"" + key + "\"";
+    for (size_t at = vdf.find(k); at != std::string::npos; at = vdf.find(k, at + 1)) {
+        size_t q1 = vdf.find('"', at + k.size()), q2 = q1 == std::string::npos ? q1 : vdf.find('"', q1 + 1);
         if (q2 == std::string::npos) break;
         std::string p = vdf.substr(q1 + 1, q2 - q1 - 1), clean;
         for (size_t i = 0; i < p.size(); ++i) {
             if (p[i] == '\\' && i + 1 < p.size() && p[i + 1] == '\\') ++i;
             clean += p[i];
         }
-        libs.push_back(widen(clean));
+        out.push_back(clean);
     }
+    return out;
+}
+
+// pasta escolhida guardada em %APPDATA%\DD2Coop\launcher.ini ("game=<pasta>", UTF-8)
+std::wstring config_dir() {
+    wchar_t* app = nullptr;
+    std::wstring d;
+    if (SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &app) == S_OK) d = std::wstring(app) + L"\\DD2Coop";
+    CoTaskMemFree(app);
+    return d;
+}
+
+std::wstring saved_game() {
+    const std::wstring d = config_dir();
+    if (d.empty()) return {};
+    const std::string ini = read_file(d + L"\\launcher.ini");
+    const size_t at = ini.find("game=");
+    if (at == std::string::npos) return {};
+    return widen(trim(ini.substr(at + 5, ini.find('\n', at) - at - 5)));
+}
+
+void save_game(const std::wstring& dir) {
+    const std::wstring d = config_dir();
+    if (d.empty()) return;
+    CreateDirectoryW(d.c_str(), nullptr);
+    write_file(d + L"\\launcher.ini", "game=" + narrow(dir) + "\n");
+}
+
+// procura sem perguntar: pasta do launcher, depois as bibliotecas da Steam
+std::wstring find_game() {
+    wchar_t self[MAX_PATH];
+    GetModuleFileNameW(nullptr, self, MAX_PATH);
+    std::wstring here = self;
+    here = here.substr(0, here.find_last_of(L"\\/"));
+    if (is_game(here)) return here;
+    std::wstring steam = reg_string(HKEY_CURRENT_USER, L"Software\\Valve\\Steam", L"SteamPath");
+    if (steam.empty()) return {};
+    std::vector<std::wstring> libs{ steam };
+    // libraryfolders.vdf: "path"		"A:\\SteamLibrary"
+    for (const auto& p : vdf_values(read_file(steam + L"\\steamapps\\libraryfolders.vdf"), "path")) libs.push_back(widen(p));
     for (const auto& lib : libs) {
-        std::wstring dir = lib + L"\\steamapps\\common\\Dragons Dogma 2";
-        if (exists(dir + L"\\DD2.exe")) return dir;
+        // appmanifest_2054970.acf: "installdir"		"Dragons Dogma 2"
+        auto dirs = vdf_values(read_file(lib + L"\\steamapps\\appmanifest_2054970.acf"), "installdir");
+        std::wstring name = dirs.empty() ? L"Dragons Dogma 2" : widen(dirs[0]);
+        std::wstring dir = lib + L"\\steamapps\\common\\" + name;
+        if (is_game(dir)) return dir;
     }
     return {};
+}
+
+// janela de escolher pasta; repete até ter DD2.exe ou a pessoa cancelar
+std::wstring pick_game(const std::wstring& start) {
+    for (;;) {
+        BROWSEINFOW bi{};
+        bi.lpszTitle = L"Escolha a pasta do Dragon's Dogma 2 (onde fica o DD2.exe)";
+        bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+        bi.lpfn = [](HWND h, UINT msg, LPARAM, LPARAM data) -> int {
+            if (msg == BFFM_INITIALIZED && data) SendMessageW(h, BFFM_SETSELECTIONW, TRUE, data);
+            return 0;
+        };
+        bi.lParam = start.empty() ? 0 : (LPARAM)start.c_str();
+        PIDLIST_ABSOLUTE id = SHBrowseForFolderW(&bi);
+        if (!id) return {};
+        wchar_t path[MAX_PATH] = {};
+        const bool ok = SHGetPathFromIDListW(id, path);
+        CoTaskMemFree(id);
+        if (ok && is_game(path)) return path;
+        MessageBoxW(nullptr, L"Essa pasta nao tem o DD2.exe. Escolha a pasta do jogo.", kTitle, MB_OK | MB_ICONWARNING);
+    }
+}
+
+// pasta do jogo: salva > achada (confirma na 1ª vez) > escolhida; vazio = cancelou
+std::wstring resolve_game(bool choose) {
+    std::wstring dir = saved_game();
+    if (!choose && is_game(dir)) return dir;
+    std::wstring found = find_game();
+    if (!choose && !found.empty()) {
+        const int r = MessageBoxW(nullptr, (L"Achei o Dragon's Dogma 2 em:\n" + found +
+            L"\n\nInstalar o mod nessa pasta?\n(Nao = escolher outra pasta)").c_str(), kTitle, MB_YESNOCANCEL | MB_ICONQUESTION);
+        if (r == IDCANCEL) return {};
+        if (r == IDYES) { save_game(found); return found; }
+    }
+    dir = pick_game(is_game(dir) ? dir : found);
+    if (!dir.empty()) save_game(dir);
+    return dir;
 }
 
 bool game_running() {
@@ -302,11 +388,13 @@ int update_mod(const std::wstring& game, std::wstring& version, std::wstring& er
 
 }  // namespace
 
-int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
-    const std::wstring game = find_game();
+int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR cmd, int) {
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    // Shift apertado ao abrir, ou --pasta: escolher outra pasta do jogo
+    const bool choose = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0 || (cmd && wcsstr(cmd, L"--pasta"));
+    const std::wstring game = resolve_game(choose);
     if (game.empty()) {
-        message(L"Nao achei o Dragon's Dogma 2. Coloque este launcher na pasta do jogo (onde fica o DD2.exe).",
-            MB_ICONERROR);
+        message(L"Pasta do Dragon's Dogma 2 nao escolhida; nada foi instalado.", MB_ICONWARNING);
         return 1;
     }
     if (game_running()) {
@@ -326,7 +414,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         message(L"Sem acesso ao GitHub e o mod nao esta instalado.", MB_ICONERROR);
         return 1;
     } else if (r == 1) {
-        message(L"DD2 Co-op atualizado para " + version + L".");
+        message(L"DD2 Co-op atualizado para " + version + L" em:\n" + game +
+            L"\n\nPara trocar a pasta, abra o launcher segurando Shift.");
     }
     ShellExecuteW(nullptr, L"open", L"steam://rungameid/2054970", nullptr, nullptr, SW_SHOWNORMAL);
     return 0;
