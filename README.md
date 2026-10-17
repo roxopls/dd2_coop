@@ -14,9 +14,6 @@ Em desenvolvimento. Use por sua conta e risco.
 - **Scripts Lua** (`src/lua`, REFramework): cópias dos outros jogadores com a aparência,
   vocação e armas deles, sincronia do mundo e dos personagens, pawns em espera durante a sessão.
 
-Cada jogador remoto é uma cópia de Arisen dirigida pelo input que ele manda; a posição é
-corrigida pelo teleporte do próprio jogo quando se afasta.
-
 ## Requisitos
 
 - Dragon's Dogma 2 (Steam)
