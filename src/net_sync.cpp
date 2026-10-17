@@ -1264,7 +1264,7 @@ void prof_pump() {
 //       direto na entrada.
 //   <in>_<SteamID>.json (plugin -> Lua) último arquivo recebido de cada jogador; <in>.json,
 //       o último de qualquer um (formato antigo, um par). Eco grava <in>_0.json e <in>.json.
-// Só aceita de quem está na lista de jogadores do próprio <out>.
+// Só aceita de quem está na lista de jogadores do próprio <out> (ou do perfil/barramento do mundo).
 constexpr size_t kBusMax = 64 * 1024;
 
 void bus_write_in(const BusState& b, uint64_t sender, const char* data, size_t n) {
@@ -1304,8 +1304,11 @@ void bus_pump(BusState& b) {
         auto* m = static_cast<SteamMsgHead*>(msgs[i]);
         const uint64_t sender = msg_sender(msgs[i]);
         const auto* body = static_cast<const char*>(m->data);
+        // quem só recebe (cliente no barramento de inimigos) não escreve <out> e fica sem lista:
+        // vale também quem está na sessão pelo perfil ou pelo barramento do mundo
         bool known = false;
-        for (const auto& p : b.peers) known = known || (sender && p.id == sender);
+        for (const auto* list : { &b.peers, &g_bus.peers, &g_prof.peers })
+            for (const auto& p : *list) known = known || (sender && p.id == sender);
         bool newest = true;
         for (int j = i + 1; j < n; ++j) newest = newest && msg_sender(msgs[j]) != sender;
         if (!known || m->size <= 0 || static_cast<size_t>(m->size) > kBusMax || body[0] != '{') {

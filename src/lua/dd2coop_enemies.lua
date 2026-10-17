@@ -172,9 +172,11 @@ re.on_pre_application_entry("LateUpdateBehavior", function()
     local host = role == "host" and peer ~= nil
     local client = (role == "cliente" and owner ~= nil) or M.eco
     if host or M.eco then pcall(publish, peer) end
-    if client then
+    if client and M.frame >= (M.retry_at or 0) then
         -- só o estado do host vale (arquivo do remetente = dono do lobby; eco: 0)
         local ok, data = pcall(json.load_file, "dd2coop_enemy_in_" .. (M.eco and "0" or owner) .. ".json")
+        -- arquivo ainda não existe: o json.load_file grava erro no log a cada tentativa; espera ~2 s
+        if not ok or type(data) ~= "table" then M.retry_at = M.frame + 120 end
         if ok and type(data) == "table" and type(data.seq) == "number" and data.seq ~= M.last_in then
             M.last_in = data.seq
             local okapply, err = pcall(apply, data)
