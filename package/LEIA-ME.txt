@@ -1,0 +1,45 @@
+DD2 Co-op - versao experimental
+================================
+
+O que tem
+---------
+- Sessao pela Steam (lobby so de amigos), ate 4 jogadores.
+- Cada amigo aparece com a aparencia, vocacao e armas DELE e repete o que ele faz.
+- O host (quem hospeda) manda no mundo: horario, clima, inimigos, NPCs e animais.
+- Com outros jogadores na sessao, os seus pawns ficam esperando; voltam quando a sessao acaba.
+- Morreu: o seu personagem some na tela dos outros e volta quando voce renasce.
+
+Ainda falta: itens no chao, XP e drops dos inimigos, quests completas, carregar o outro
+jogador (pode funcionar, nao testado), icones dos jogadores no mapa.
+
+Seu save fica protegido
+-----------------------
+O mod usa um SAVE CO-OP proprio: na primeira abertura ele copia o seu save para
+remote\win64_coop na Steam e passa a gravar SO la. O save normal (win64_save) nao e
+alterado. Mesmo assim, faca backup de:
+  C:\Program Files (x86)\Steam\userdata\<seu numero>\2054970\remote\win64_save
+Com 3 ou mais jogadores o jogo NAO salva (seguranca, ate validarmos).
+
+Instalacao
+----------
+Pelo launcher (recomendado): ele baixa a ultima versao, instala e abre o jogo.
+Manual:
+1. Feche o jogo.
+2. Instale o REFramework (nightly) na pasta do jogo.
+3. Copie TUDO deste pacote para dentro da pasta do jogo, mesclando "reframework".
+
+Como jogar
+----------
+HOST:    Insert > Script Generated UI > "DD2 Co-op: sessao (host/cliente)" > "Hospedar sessao".
+AMIGOS:  no mesmo painel, cole o SteamID64 do host e clique "Entrar no amigo".
+O resto e automatico (10-20 s). Todos precisam da MESMA versao do mod.
+
+O que reportar
+--------------
+- Se o jogo fechou: re2_framework_log.txt da pasta do jogo.
+- A pasta reframework\data (arquivos dd2coop_*.json e .txt).
+
+Desinstalar
+-----------
+Apague reframework\plugins\dd2coop_net.dll e os arquivos dd2coop_*.lua de
+reframework\autorun.

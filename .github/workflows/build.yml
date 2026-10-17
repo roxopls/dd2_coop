@@ -1,0 +1,67 @@
+name: build
+
+# Todo push: compila e testa. Tag v* (ex.: v0.5.0): também publica a Release com o pacote
+# (DD2Coop.zip) e o SHA256 dele, que o launcher confere antes de instalar.
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: false
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            zip
+
+      - name: Compilar
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build
+
+      - name: Testes
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Pacote
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          [[ "$GITHUB_REF_TYPE" == "tag" ]] || VERSION="dev-${GITHUB_SHA::7}"
+          rm -rf pkg && mkdir -p pkg/reframework/plugins pkg/reframework/autorun
+          cp -r package/. pkg/
+          cp build/dd2coop_net.dll pkg/reframework/plugins/
+          cp src/lua/*.lua pkg/reframework/autorun/
+          echo "$VERSION" > pkg/reframework/data/dd2coop_version.txt
+          (cd pkg && zip -qr ../DD2Coop.zip .)
+          sha256sum DD2Coop.zip | cut -d' ' -f1 > DD2Coop.zip.sha256
+          cat DD2Coop.zip.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DD2Coop
+          path: |
+            DD2Coop.zip
+            DD2Coop.zip.sha256
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            DD2Coop.zip
+            DD2Coop.zip.sha256
