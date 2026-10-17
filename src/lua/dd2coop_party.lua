@@ -16,7 +16,7 @@
 -- sem sessão os pawns voltam.
 local M = { frame = 0, standby = false, message = "", loaded_at = nil }
 local LOAD_WINDOW = 30
-local last_me = nil
+local last_me = nil -- nil: script recém-carregado; false: jogador ausente (carregando); endereço: jogador presente
 _G.dd2coop_party = M
 
 local MARK = "dd2coop_party.json"
@@ -82,21 +82,25 @@ re.on_pre_application_entry("LateUpdateBehavior", function()
     M.frame = M.frame + 1
     if M.frame % 60 ~= 0 then return end
     local me = in_game()
-    if not me then last_me = nil; return end
-    -- carga nova (ou primeira): só agora os pawns descarregados por uma sessão anterior podem voltar
-    local addr = me:get_address()
-    if addr ~= last_me then
-        last_me = addr
+    if not me then last_me = false; return end
+    -- carga de save: o jogador some (tela de carregamento/título) e volta. Só então os pawns
+    -- descarregados por uma sessão anterior podem voltar. Reset de scripts no meio do jogo não
+    -- conta (last_me começa nil, não false), nem a cópia tomando o ManualPlayer.
+    if last_me == false then
         M.loaded_at, M.back_ok = os.clock(), M.standby
     end
+    last_me = me:get_address()
     local S = _G.dd2coop_session
     local ls = S and S.status
     local with_player = ls and (ls.role == "host" or ls.role == "cliente") and S.peer ~= nil
+    local in_window = M.loaded_at ~= nil and os.clock() - M.loaded_at < LOAD_WINDOW
     local ok, err
-    if with_player or copies_alive() then
+    if with_player or (copies_alive() and not in_window) then
         ok, err = pcall(send_away)
         M.back_ok = false
-    elseif M.standby and M.back_ok and os.clock() - M.loaded_at < LOAD_WINDOW then
+    elseif copies_alive() then
+        ok = true -- logo depois da carga o puppet ainda pode estar com o estado antigo: espera
+    elseif M.standby and M.back_ok and in_window then
         ok, err = pcall(bring_back, me)
     else
         ok = true

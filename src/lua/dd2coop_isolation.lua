@@ -98,6 +98,26 @@ do
     end
 end
 
+-- Auto-destruição: o AutoDestroyDistributorUnit da categoria Arisen (GeneratorCategory 0) tenta
+-- destruir a cópia longe do jogador e crasha em InstanceInfoController.autoDestroyCharaInstance
+-- (voltando à cidade onde a cópia ficou, 2026-10-17). Com cópia viva, essa unidade não roda; o
+-- Arisen de verdade nunca é auto-destruído.
+do
+    local td = sdk.find_type_definition("app.AutoDestroyDistributorUnit")
+    local m = td and td:get_method("update")
+    if m then
+        sdk.hook(m, function(args)
+            if not clone_addresses() then return end
+            local ok, cat = pcall(function() return sdk.to_managed_object(args[2]):call("get_Category") end)
+            if ok and cat == 0 then
+                M.counts.autoDestroy = (M.counts.autoDestroy or 0) + 1
+                return sdk.PreHookResult.SKIP_ORIGINAL
+            end
+        end, function(r) return r end)
+        M.hooks = M.hooks + 1
+    end
+end
+
 -- Peso: com a cópia no mundo o ItemManager.getWeightLimit do Arisen (por Character ou por
 -- CharacterID) passa a ler o status da cópia (nível 1: limite 35 em vez de 61,65) e o jogador
 -- fica sobrecarregado (2026-10-17). Enquanto houver cópia, devolve o limite do jogador guardado
@@ -200,6 +220,10 @@ do
             local set = clone_addresses()
             if set and set[me:get_address()] then return end -- controle ainda na cópia (criando)
             local h = me:call("get_Hit")
+            -- cópia sendo criada (ainda sem endereço): a vida já pode ter sido cortada, não guarda
+            local P, X = _G.dd2coop_p2, _G.dd2coop_extra
+            local creating = (P and P.state ~= "nenhum" and P.state ~= "pronto") or (X and X.busy)
+            if not set and creating then return end
             if not set then
                 saved = { hp = h:call("get_Hp"), reduced = h:call("get_ReducedMaxHp"), max = h:call("get_OriginalMaxHp") }
                 restore_at = nil
@@ -213,8 +237,9 @@ do
             restore_at = restore_at or frame + 90
             if saved and frame >= restore_at then
                 local R = _G.dd2coop_revive
-                if not (R and R.downed) and h:call("get_ReducedMaxHp") < saved.reduced - 0.5 then
-                    h:call("setReducedMaxHpValue", saved.reduced)
+                local cut = h:call("get_ReducedMaxHp") < saved.reduced - 0.5 or h:call("get_Hp") < saved.hp - 0.5
+                if not (R and R.downed) and cut then
+                    if h:call("get_ReducedMaxHp") < saved.reduced - 0.5 then h:call("setReducedMaxHpValue", saved.reduced) end
                     h:call(SET_HP, math.min(saved.hp, saved.reduced), false, 0)
                     M.counts.hpRestore = (M.counts.hpRestore or 0) + 1
                 end
