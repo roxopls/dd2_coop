@@ -198,6 +198,11 @@ do
         local calc = calculator()
         if calc and (calc:get_field("Human") ~= hu or
                 calc:get_field("Param"):get_field("Status") ~= hu:call("get_StatusContext")) then
+            -- set_field grava o ponteiro sem contar referência: o jogo depois solta o Human do campo
+            -- (ao abrir o menu) e, sem esta referência a mais, soltava o do jogador uma vez a mais
+            -- (crash em DD2.exe+0x52345ae, lock dec no contador e cabeçalho já liberado, 2026-10-17).
+            -- O Human antigo (da cópia) fica com uma referência a mais: vazamento pequeno e seguro.
+            if hu.add_ref_permanent then hu:add_ref_permanent() else hu:add_ref() end
             calc:set_field("Human", hu)
             calc:call("setContexts(app.ContextHolder)", me:call("get_Context"))
             M.counts.calculator = (M.counts.calculator or 0) + 1

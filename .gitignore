@@ -12,3 +12,4 @@ PROGRESS.txt
 # Python
 __pycache__/
 *.pyc
+crash_logs/

@@ -38,11 +38,29 @@ local function in_game()
     return cm and cm:call("get_ManualPlayer")
 end
 
--- pawns fora do mundo (descarregados ou nenhum no grupo)
+-- algum pawn (CharaKind 2) ainda na lista de personagens?
+local function pawns_in_world()
+    local list = sdk.get_managed_singleton("app.CharacterListHolder"):call("getAllCharacters")
+    for i = 0, (list and list:call("get_Count") or 0) - 1 do
+        local ch = list:call("get_Item", i)
+        local ok, kind = pcall(function() return ch:call("get_Context"):call("get_CharaKind") end)
+        if ok and kind == 2 then return true end
+    end
+    return false
+end
+
+-- pawns fora do mundo (descarregados ou nenhum no grupo) há AWAY_SETTLE s. IsStandbyUnload fica
+-- true na hora do standby, mas os pawns ainda estão sendo desmontados: criar a cópia 5 s depois
+-- crashou lendo um objeto já liberado (cabeçalho = 0x3f80000000000000, dado de vetor; 2026-10-17).
+local AWAY_SETTLE = 3
 function M.away()
     local pm = sdk.get_managed_singleton("app.PawnManager")
     if not pm then return false end
-    return pm:call("get_IsStandbyUnload") or pm:call("get_PartyPawnList"):call("get_Count") == 0
+    local gone = (pm:call("get_IsStandbyUnload") or pm:call("get_PartyPawnList"):call("get_Count") == 0)
+        and not pawns_in_world()
+    if not gone then M.clear_since = nil; return false end
+    M.clear_since = M.clear_since or os.clock()
+    return os.clock() - M.clear_since >= AWAY_SETTLE
 end
 
 local function send_away()
@@ -106,6 +124,7 @@ re.on_pre_application_entry("LateUpdateBehavior", function()
         ok = true
     end
     if not ok then M.message = "erro nos pawns: " .. tostring(err) end
+    pcall(M.away) -- mantém a contagem de "pawns fora há N s" em dia
 end)
 
 re.on_draw_ui(function()
