@@ -15,7 +15,7 @@
 //    antigos são apagados antes, para não sobrar script renomeado/removido). Arquivos de
 //    estado do mod em reframework\data ficam.
 // 6. Abre o jogo pela Steam e espera ele fechar. Versão (mod e REFramework) que rodou 10 min
-//    ou fechou sem crash vira "boa". Crash (reframework_crash.dmp novo ou código de exceção)
+//    ou fechou sem crash vira "boa". Crash (reframework_crash.dmp novo ou CrashReport.exe aberto)
 //    antes disso com versão ainda não boa: volta para a última boa e marca a nova como ruim
 //    (não reinstala até sair outra).
 // Sem internet ou sem Release: abre o jogo com o que já está instalado.
@@ -332,9 +332,10 @@ std::wstring resolve_game(Kv& st, bool choose) {
     return dir;
 }
 
-// pid do DD2.exe rodando (0 = nenhum); só pelo processo: pelo título da janela, a página do
-// jogo na Steam também batia
-DWORD game_pid() {
+// pid de um processo pelo nome do .exe (0 = nenhum); para o jogo, só pelo processo: pelo título
+// da janela, a página do jogo na Steam também batia
+DWORD process_pid(const std::wstring& exe) {
+    const std::wstring tail = L"\\" + exe;
     DWORD pids[4096], bytes = 0;
     if (!EnumProcesses(pids, sizeof(pids), &bytes)) return 0;
     for (DWORD i = 0; i < bytes / sizeof(DWORD); ++i) {
@@ -345,13 +346,15 @@ DWORD game_pid() {
         bool found = false;
         if (QueryFullProcessImageNameW(p, 0, name, &n)) {
             std::wstring s = name;
-            found = s.size() >= 8 && _wcsicmp(s.c_str() + s.size() - 8, L"\\DD2.exe") == 0;
+            found = s.size() >= tail.size() && _wcsicmp(s.c_str() + s.size() - tail.size(), tail.c_str()) == 0;
         }
         CloseHandle(p);
         if (found) return pids[i];
     }
     return 0;
 }
+
+DWORD game_pid() { return process_pid(L"DD2.exe"); }
 
 // extrai um zip com o tar do Windows (bsdtar, Windows 10+)
 bool unzip(const std::wstring& zip, const std::wstring& dest) {
@@ -481,13 +484,15 @@ ULONGLONG now_time() {
 }
 
 // espera o jogo abrir (até 3 min) e fechar; false = não abriu. A Steam pode reabrir o DD2.exe
-// logo em seguida: só conta como fechado se nenhum aparecer em 10 s.
-bool watch_game(ULONGLONG& ran_ms, DWORD& code) {
+// logo em seguida: só conta como fechado se nenhum aparecer em 10 s. reporter = o
+// CrashReport.exe da Capcom abriu nesses 10 s (crash que o REFramework não pegou).
+bool watch_game(ULONGLONG& ran_ms, DWORD& code, bool& reporter) {
     DWORD pid = 0;
     for (int i = 0; i < 180 && !(pid = game_pid()); ++i) Sleep(1000);
     if (!pid) return false;
     const ULONGLONG start = GetTickCount64();
     code = 0;
+    reporter = false;
     while (pid) {
         HANDLE p = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
         if (p) {
@@ -498,7 +503,10 @@ bool watch_game(ULONGLONG& ran_ms, DWORD& code) {
             Sleep(1000);
         }
         pid = 0;
-        for (int i = 0; i < 10 && !(pid = game_pid()); ++i) Sleep(1000);
+        for (int i = 0; i < 10 && !(pid = game_pid()); ++i) {
+            if (process_pid(L"CrashReport.exe")) reporter = true;
+            Sleep(1000);
+        }
     }
     ran_ms = GetTickCount64() - start;
     return true;
@@ -508,8 +516,14 @@ bool watch_game(ULONGLONG& ran_ms, DWORD& code) {
 void after_game(const std::wstring& game, Kv& st, ULONGLONG launched) {
     ULONGLONG ran = 0;
     DWORD code = 0;
-    if (!watch_game(ran, code)) return;
-    const bool crashed = file_time(game + L"\\reframework_crash.dmp") > launched || code >= 0xC0000000;
+    bool reporter = false;
+    if (!watch_game(ran, code, reporter)) return;
+    // o código de saída não serve: o DD2 fechado pelo menu também sai com código alto
+    // (falso crash visto em 2026-10-17); fica no ini só para diagnóstico
+    char hex[16];
+    snprintf(hex, sizeof(hex), "%08lx", (unsigned long)code);
+    st["last_exit"] = hex;
+    const bool crashed = file_time(game + L"\\reframework_crash.dmp") > launched || reporter;
     if (!crashed || ran >= kGoodAfterMs) {
         st["mod_good"] = st["mod"];
         st["ref_good_url"] = st["ref_url"], st["ref_good_sha"] = st["ref_sha"];
