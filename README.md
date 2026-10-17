@@ -1,6 +1,6 @@
 # DD2 Co-op
 
-Co-op online para Dragon's Dogma 2: até 4 jogadores por enquantoi, cada um com o
+Co-op online para Dragon's Dogma 2: até 4 jogadores por enquanto, cada um com o
 seu próprio personagem, via rede P2P da Steam. O host (quem cria a sessão) é a
 autoridade do mundo: horário, clima, quests, inimigos e NPCs.
 
