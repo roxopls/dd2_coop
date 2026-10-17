@@ -19,6 +19,12 @@ Em desenvolvimento. Use por sua conta e risco.
 - Dragon's Dogma 2 (Steam)
 - [REFramework](https://github.com/praydog/REFramework-nightly) (nightly)
 
+## Estado atual
+
+- Ainda não funciona a sincronização de quest
+- Fases Inicial de testes de sincronização e animações
+- Fase Inicial de sincronização de inimigos e NPCs
+
 ## Compilar
 
 MinGW-w64 (GCC) + CMake + Ninja:
