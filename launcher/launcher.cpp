@@ -177,9 +177,7 @@ std::wstring find_game() {
 }
 
 bool game_running() {
-    HWND w = FindWindowW(nullptr, L"Dragon's Dogma 2");
-    if (w) return true;
-    // pelo processo: DD2.exe
+    // só pelo processo DD2.exe: pelo título da janela, a página do jogo na Steam também batia
     bool found = false;
     DWORD pids[4096], bytes = 0;
     if (!EnumProcesses(pids, sizeof(pids), &bytes)) return false;
