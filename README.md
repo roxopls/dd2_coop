@@ -13,6 +13,8 @@ Em desenvolvimento. Use por sua conta e risco.
   cópia dele, save co-op separado (`win64_coop`, o save normal não é tocado).
 - **Scripts Lua** (`src/lua`, REFramework): cópias dos outros jogadores com a aparência,
   vocação e armas deles, sincronia do mundo e dos personagens, pawns em espera durante a sessão.
+-  **Launcher de instalação**: Launcher baixa o REFramework e o mod direto do github e instala na 
+pasta do jogo, se ele não achar, você pode escolher onde o jogo tá instalado.
 
 ## Requisitos
 
