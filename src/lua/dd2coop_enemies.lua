@@ -5,7 +5,8 @@
 -- jogo; o UniqueID dos que vagam é sorteado na hora e não serve).
 -- Host: a cada 6 quadros publica os inimigos perto dele { k, x, y, z, hp, d }.
 -- Cliente: o inimigo local com a mesma chave segue o host: vida igual à do host, não morre
--- sozinho (IsNoDie) e morre quando o host diz; afastado mais que WARP_DIST, é teleportado.
+-- sozinho (IsNoDie) e morre quando o host diz; afastado mais que NUDGE_DIST é puxado aos poucos,
+-- mais que WARP_DIST é teleportado.
 -- O dano do cliente chega ao host pelo jogador 2 (o host simula os ataques dele), então a vida
 -- do host já inclui os golpes dos dois.
 -- Formato: dd2coop_enemy_out.json { seq, mode, peer, e = { {k,x,y,z,hp,d}, ... } }.
@@ -16,7 +17,9 @@ _G.dd2coop_enemies = M
 local OUT, IN = "dd2coop_enemy_out.json", "dd2coop_enemy_in.json"
 local RANGE = 150      -- m: inimigos publicados ao redor do host
 local MAX_SEND = 80     -- cidades têm dezenas de NPCs
-local WARP_DIST = 4.0  -- m: deriva que o cliente corrige por teleporte
+local WARP_DIST = 12.0 -- m: deriva que o cliente corrige com um teleporte inteiro (no máx. 1/s)
+local NUDGE_DIST = 2.5 -- m: acima disso puxa aos poucos (warp curto de NUDGE da deriva por pacote)
+local NUDGE = 0.3
 local KILL = "killAndSetDieLoop(app.Character.KillAndSetDieLoopOption)"
 local SET_HP = "setHp(System.Single, System.Boolean, System.Int32)"
 local WARP = "warp(via.Position, via.Quaternion, app.CharacterWarpOption)"
@@ -122,12 +125,15 @@ local function follow(ch, s)
         local xf = ch:call("get_GameObject"):call("get_Transform")
         local p = xf:call("get_UniversalPosition")
         local dx, dy, dz = p.x - s.x, p.y - s.y, p.z - s.z
-        if dx * dx + dy * dy + dz * dz > WARP_DIST * WARP_DIST and M.frame - (last_warp[a] or -1000) >= 60 then
-            last_warp[a] = M.frame
+        local d2 = dx * dx + dy * dy + dz * dz
+        local hard = d2 > WARP_DIST * WARP_DIST
+        if (hard and M.frame - (last_warp[a] or -1000) >= 60) or (not hard and d2 > NUDGE_DIST * NUDGE_DIST) then
+            local f = hard and 1 or NUDGE
+            if hard then last_warp[a] = M.frame end
             local np = ValueType.new(sdk.find_type_definition("via.Position"))
-            np:set_field("x", s.x); np:set_field("y", s.y); np:set_field("z", s.z)
+            np:set_field("x", p.x - dx * f); np:set_field("y", p.y - dy * f); np:set_field("z", p.z - dz * f)
             ch:call(WARP, np, xf:call("get_Rotation"), nil)
-            M.warped = M.warped + 1
+            if hard then M.warped = M.warped + 1 else M.nudged = (M.nudged or 0) + 1 end
         end
     end
 end
@@ -191,7 +197,7 @@ re.on_draw_ui(function()
     if not imgui.tree_node("DD2 Co-op: personagens do host (inimigos, NPCs)") then return end
     imgui.text("papel: " .. session() .. "  (host publica; cliente segue)")
     imgui.text(string.format("publicados=%d  recebidos=%d  casados=%d  sem par=%d", M.sent, M.remote, M.matched, M.unmatched))
-    imgui.text(string.format("mortes aplicadas=%d  teleportes=%d  vida acertada=%d", M.killed, M.warped, M.hp_set))
+    imgui.text(string.format("mortes aplicadas=%d  teleportes=%d  puxoes=%d  vida acertada=%d", M.killed, M.warped, M.nudged or 0, M.hp_set))
     local c, v = imgui.checkbox("Teste local (eco: publica e aplica neste PC)", M.eco)
     if c then M.eco = v; if not v then release() end end
     if M.message ~= "" then imgui.text(M.message) end

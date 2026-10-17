@@ -300,7 +300,10 @@ struct Config {
     uintptr_t orig_xf = 0;   // via.Transform do player (pose enviada em todo pacote)
     PeerCfg peers[3];
     int peer_count = 0;
-    double snap = 1.5;       // deriva (m) a partir da qual a cópia é reposicionada
+    double snap = 1.5;       // deriva (m) a partir da qual a cópia é puxada aos poucos
+    double snap_far = 6.0;   // deriva (m) a partir da qual a cópia é teleportada de uma vez
+    double nudge = 0.25;     // fração da deriva corrigida por passo (puxar aos poucos)
+    int nudge_every = 4;     // quadros entre passos
     int jitter = 6;
     Pose my_pose;         // pose do player escrita pelo Lua (reserva, se orig_xf faltar)
 } g_cfg;
@@ -373,7 +376,7 @@ struct Slot {
     Pose remote_pose;               // última pose recebida
     bool placed = false;            // cópia já foi posta na pose do jogador
     double drift = -1;              // distância entre a cópia e a pose do pacote aplicado
-    uint64_t snaps = 0, warp_fail = 0;
+    uint64_t snaps = 0, nudges = 0, warp_fail = 0;
     int last_warp = -1000;          // quadro do último warp
     double play_offset = 0;         // hora local - hora do remetente no ponto de reprodução
     double last_play_ms = 0;
@@ -581,6 +584,10 @@ void load_config() {
     c.orig_xf = static_cast<uintptr_t>(json_num(s, "orig_xf", 0));
     c.peer_count = parse_peers(s, c.peers);
     c.snap = json_num(s, "snap", 1.5);
+    c.snap_far = json_num(s, "snap_far", 6.0);
+    c.nudge = json_num(s, "nudge", 0.25);
+    c.nudge_every = static_cast<int>(json_num(s, "nudge_every", 4));
+    if (c.nudge_every < 1) c.nudge_every = 1;
     c.my_pose.x = json_num(s, "px", 0);
     c.my_pose.y = json_num(s, "py", 0);
     c.my_pose.z = json_num(s, "pz", 0);
@@ -673,11 +680,11 @@ void write_status() {
         long long age;
         const char* st = slot_state(s, age);
         std::fprintf(f, "%s{\"peer\":\"%llu\",\"input_state\":\"%s\",\"rx_age_ms\":%lld,\"received\":%llu,"
-            "\"applied\":%llu,\"held\":%llu,\"buffered\":%zu,\"drift\":%.3f,\"snaps\":%llu,\"warp_fail\":%llu,"
+            "\"applied\":%llu,\"held\":%llu,\"buffered\":%zu,\"drift\":%.3f,\"snaps\":%llu,\"nudges\":%llu,\"warp_fail\":%llu,"
             "\"timeouts\":%llu,\"remote_valid\":%s,\"rx\":%.4f,\"ry\":%.4f,\"rz\":%.4f}",
             i ? "," : "", (unsigned long long)s.peer64, st, age, (unsigned long long)s.received,
             (unsigned long long)s.applied, (unsigned long long)s.held, s.buffer.size(), s.drift,
-            (unsigned long long)s.snaps, (unsigned long long)s.warp_fail, (unsigned long long)s.timeouts,
+            (unsigned long long)s.snaps, (unsigned long long)s.nudges, (unsigned long long)s.warp_fail, (unsigned long long)s.timeouts,
             s.remote_pose.valid ? "true" : "false", s.remote_pose.x, s.remote_pose.y, s.remote_pose.z);
     }
     std::fprintf(f, "]");
@@ -962,7 +969,10 @@ bool warp_clone(uintptr_t ch, const Pose& pose) {
 
 // P2P: compara a cópia com a pose do jogador DO MESMO PACOTE cujo input ela está executando
 // (o 1º teste comparava com uma pose de até 0,5 s antes, e a defasagem sozinha passava do
-// limite). Repõe na primeira pose e quando a deriva real passa de `snap`.
+// limite). Repõe na primeira pose e quando a deriva passa de `snap_far` (no máx. 3 por segundo);
+// entre `snap` e `snap_far` puxa aos poucos: a cada `nudge_every` quadros um warp curto que
+// anda `nudge` da deriva (no teste de 2026-10-17 o teleporte inteiro a partir de 1,5 m dava
+// ~0,6 saltos visíveis por segundo).
 void correct_clone(Slot& s) {
     if (g_cfg.mode != "p2p" || !s.clone_xf) return;
     Pose target;
@@ -975,11 +985,20 @@ void correct_clone(Slot& s) {
     if (!read_pose(s.clone_xf, cur)) return;
     double dx = cur.x - target.x, dy = cur.y - target.y, dz = cur.z - target.z;
     s.drift = std::sqrt(dx * dx + dy * dy + dz * dz);
-    if (s.placed && (s.drift < g_cfg.snap || g_frame - s.last_warp < 20)) return;  // no máx. 3 por segundo
-    if (warp_clone(s.clone_ch, target)) {
+    if (s.placed && s.drift < g_cfg.snap) return;
+    const bool hard = !s.placed || s.drift >= g_cfg.snap_far;
+    if (hard && s.placed && g_frame - s.last_warp < 20) return;
+    if (!hard && g_frame - s.last_warp < g_cfg.nudge_every) return;
+    Pose to = target;
+    if (!hard) {
+        to.x = cur.x - dx * g_cfg.nudge;
+        to.y = cur.y - dy * g_cfg.nudge;
+        to.z = cur.z - dz * g_cfg.nudge;
+    }
+    if (warp_clone(s.clone_ch, to)) {
         s.placed = true;
         s.last_warp = g_frame;
-        ++s.snaps;
+        if (hard) ++s.snaps; else ++s.nudges;
     } else if (++s.warp_fail == 1) {
         g_ref->log_error("[dd2coop_net] warp da copia recusado (ch=%llx)", (unsigned long long)s.clone_ch);
     }
