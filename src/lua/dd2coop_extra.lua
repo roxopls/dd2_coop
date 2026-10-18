@@ -58,7 +58,10 @@ local function arisen_now()
     local all = sdk.get_managed_singleton("app.CharacterListHolder"):call("getAllCharacters")
     for i = 0, all:call("get_Count") - 1 do
         local ch = all:call("get_Item", i)
-        if ch and ch:call("get_CharaID") == ARISEN_ID then out[ch:get_address()] = ch end
+        local id = ch and ch:call("get_CharaID")
+        local R = _G.dd2coop_replica_id
+        -- original e cópias (as cópias podem ter o ID próprio, dd2coop_replica_id)
+        if ch and (id == ARISEN_ID or (R and R.is_replica(id))) then out[ch:get_address()] = ch end
     end
     return out
 end
@@ -80,11 +83,8 @@ local function settle(orig)
         if tc == nil or tc:get_address() ~= orig:get_address() then
             mcc:call("registerTargetObject", orig:call("get_GameObject"))
         end
-        -- a câmera também passa a ler o controle da cópia: o amigo girava a câmera do host
-        -- (2026-10-17). set_UserInput (método do jogo, nunca set_field) devolve o do jogador;
-        -- switchUserInput voltava para a cópia, não usar.
-        local mi, ui = orig:call("get_Input"), mcc:call("get_UserInput")
-        if mi and (ui == nil or ui:get_address() ~= mi:get_address()) then mcc:call("set_UserInput", mi) end
+        -- NÃO chamar mcc:set_UserInput aqui: crashava a criação da cópia ou minutos depois
+        -- (2026-10-18). O controle da câmera é protegido no dd2coop_camera.lua.
     end
 end
 
@@ -101,10 +101,21 @@ local function spawn(slot)
         slot.state, slot.info = "limite", "limite de 4 Arisen"
         return false
     end
+    -- CharacterID próprio do jogador deste slot (slot 1 = jogador 3, slot 2 = jogador 4), nunca o
+    -- do jogador local; se a preparação falhar, nasce com o do Arisen, como antes
+    local R = _G.dd2coop_replica_id
+    local spawn_id = ARISEN_ID
+    local n = 1
+    for i, s in ipairs(M.slots) do if s == slot then n = i end end
+    local own_id = R and R.id_for(n + 1)
+    if own_id and not R.failed(own_id) then
+        if not R.ensure(own_id) then slot.info = "preparando o ID proprio da copia"; return false end
+        spawn_id = own_id
+    end
     A.next_build = { data = bundle.avatar, original = orig, skip = before }
     local guid = sdk.find_type_definition("System.Guid"):get_method("NewGuid"):call(nil)
-    local GM, m_gen = gm_method("createGeneratorID", 2, "System.Guid")
-    local _, m_uid = gm_method("createUniqueID", 2, "System.Guid")
+    local GM, m_gen = gm_method("createGeneratorIDNoUsePool", 2, "System.Guid")
+    local _, m_uid = gm_method("createUniqueIDNoUsePool", 2, "System.Guid")
     local _, m_box = gm_method("getPoolGenerateInfoContainerForCharacter", 9)
     local _, m_new = gm_method("safeRequestCreateInstance", 3)
     local xf = orig:call("get_GameObject"):call("get_Transform")
@@ -112,14 +123,27 @@ local function spawn(slot)
     local fwd = rot * Vector3f.new(0, 0, -3)
     local up = xf:call("get_UniversalPosition")
     up.x, up.z = up.x + fwd.x, up.z + fwd.z
-    local c = m_box:call(GM, m_gen:call(GM, guid, 0), m_uid:call(GM, guid, 0), up, rot,
-        Vector3f.new(1, 1, 1), 0, 0, ARISEN_ID, 2)
+    local gen = m_gen:call(GM, guid, 0)
+    if R then R.retain_generation_id(gen) elseif gen then gen:add_ref() end
+    local uid = m_uid:call(GM, guid, 0)
+    if R then R.retain_generation_id(uid) elseif uid then uid:add_ref() end
+    local c = m_box:call(GM, gen, uid, up, rot,
+        Vector3f.new(1, 1, 1), 0, 0, spawn_id, 2)
     if c == nil then A.next_build = nil; slot.info = "container nao criado"; return false end
     -- vivo enquanto a cópia existir (ver cabeçalho); permanente: add_ref() é solta no reset de scripts
     if c.add_ref_permanent then c:add_ref_permanent() else c:add_ref() end
     slot.container = c
     slot.before, slot.started, slot.state = before, M.frame, "gerando"
     slot.profile = bundle.profile
+    if R then
+        local ok, err = R.prepare_container(c)
+        if not ok then
+            A.next_build = nil
+            slot.state, slot.info = "falhou", "falha ao preparar a copia: " .. tostring(err)
+            return false
+        end
+    end
+    if spawn_id ~= ARISEN_ID then R.arm_classification(spawn_id) end
     m_new:call(GM, c, nil, nil)
     M.busy = slot
     log.info("[dd2coop_extra] copia pedida para " .. slot.peer)
@@ -130,11 +154,20 @@ local function adopt(slot, ch, orig)
     slot.clone = ch:add_ref()
     slot.addr = ch:get_address()
     pcall(settle, orig)
+    -- ID próprio: o calculador de status dele só liga depois da adoção (dd2coop_replica_id)
+    local R = _G.dd2coop_replica_id
+    if R and R.is_replica(ch:call("get_CharaID")) then R.bind(ch) end
     pcall(function() ch:call("get_InputProcessor"):call("set_IsEnable", false) end)
     pcall(function()
         local hit = ch:call("get_Hit")
         hit:call("set_IsNoDie", true)        -- a vida dele é decidida no PC dele
         hit:call("set_IsInvincible", true)
+    end)
+    -- stamina: segue a do jogador dele (dd2coop_world, vitals.st); até lá, cheia e sem consumo
+    pcall(function()
+        local sm = ch:call("get_StaminaManager")
+        sm:call("set_IsEnableConsume", false)
+        sm:call("recoverAll")
     end)
     pcall(function() ch:call("get_GameObject"):call("set_DrawSelf", false) end)
     slot.drawn = false

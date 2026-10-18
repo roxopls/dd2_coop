@@ -8,6 +8,7 @@ from lupa.lua54 import LuaRuntime
 
 MOCKS = r'''
 files, callbacks, hooks = {}, {}, {}
+dd2coop_party = {away=function() return true end, send_away=function() end}
 files.dd2coop_net_status_json = nil
 files['dd2coop_net_status.json'] = { instance = 'game1', lua_epoch = 0, save_hooks = 6, me = '76561198000000001' }
 local function copy(v)
@@ -84,8 +85,8 @@ holder = obj({getAllCharacters = function()
     return obj({get_Count = function() return #world end, get_Item = function(i) return world[i+1] end})
 end})
 local gm_methods = {
-    method('GM', 'createGeneratorID', 2, 'System.Guid', function() return 1 end),
-    method('GM', 'createUniqueID', 2, 'System.Guid', function() return 2 end),
+    method('GM', 'createGeneratorIDNoUsePool', 2, 'System.Guid', function() return obj() end),
+    method('GM', 'createUniqueIDNoUsePool', 2, 'System.Guid', function() return obj() end),
     method('GM', 'getPoolGenerateInfoContainerForCharacter', 9, '', function() return obj() end),
     method('GM', 'safeRequestCreateInstance', 3, '', function() spawn_requests = spawn_requests + 1; return 2 end),
 }
@@ -218,6 +219,48 @@ class SessionTests(unittest.TestCase):
         self.g.ticks(60)
         self.assertEqual(self.g.dd2coop_p2.state, 'recuperacao')
         self.assertEqual(self.g.files['dd2coop_net_cfg.json'].mode, 'off')
+        self.assertTrue(self.g.files['dd2coop_net_cfg.json'].save_lock)
+
+    def test_reloaded_save_with_new_player_allows_new_session(self):
+        self.ready_pair()
+        self.lua.execute('dd2coop_p2.guard_until=0; original = character(); world = {original}; manual = original')
+        self.g.ticks(60)
+        self.assertEqual(self.g.dd2coop_p2.state, 'nenhum')
+        self.assertFalse(self.g.files['dd2coop_net_cfg.json'].save_lock)
+
+    def test_generation_preparation_precedes_native_spawn(self):
+        self.load(); self.g.ticks(1)
+        self.lua.execute('''
+            order = {}
+            dd2coop_replica_id = {
+                id_for=function() return 260732951 end,
+                failed=function() return false end, ensure=function() return true end,
+                retain_generation_id=function(o) o:add_ref(); table.insert(order,'id') end,
+                prepare_container=function(c)
+                    assert(spawn_requests==0); table.insert(order,'prepare'); return true
+                end,
+                arm_classification=function(id)
+                    assert(id==260732951 and order[3]=='prepare')
+                    table.insert(order,'arm')
+                end
+            }
+        ''')
+        self.g.dd2coop_p2.create()
+        self.assertEqual(self.g.spawn_requests, 1)
+        self.assertEqual(self.lua.eval("table.concat(order,',')"), 'id,id,prepare,arm')
+
+    def test_failed_generation_preparation_never_spawns(self):
+        self.load(); self.g.ticks(1)
+        self.lua.execute('''
+            dd2coop_replica_id = {
+                id_for=function() return nil end,
+                retain_generation_id=function(o) o:add_ref() end,
+                prepare_container=function() return false,'invalid HumanInfo' end
+            }
+        ''')
+        self.g.dd2coop_p2.create()
+        self.assertEqual(self.g.spawn_requests, 0)
+        self.assertEqual(self.g.dd2coop_p2.state, 'recuperacao')
         self.assertTrue(self.g.files['dd2coop_net_cfg.json'].save_lock)
 
     def test_missing_original_stops_remaining_replica_input(self):

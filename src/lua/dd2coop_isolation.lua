@@ -39,6 +39,27 @@ local function clone_addresses()
     return any and set or nil
 end
 
+-- Cópia nascendo: o jogo dá a ela o equipamento do Arisen com getItem(item, n, cópia) e
+-- setEquip, antes de ela entrar em clone_addresses. Como o inventário é por CharacterID, cada
+-- criação punha no inventário do jogador mais uma unidade de cada peça de armadura equipada
+-- (2026-10-18). Enquanto alguma cópia estiver sendo criada, qualquer Arisen que não seja o
+-- jogador conta como cópia.
+local ARISEN = 2891076981
+local function creating()
+    local P, X = _G.dd2coop_p2, _G.dd2coop_extra
+    return (P and P.state ~= "nenhum" and P.state ~= "pronto") or (X and X.busy) and true or false
+end
+local function player_address()
+    local P = _G.dd2coop_p2
+    local p = P and P.orig or sdk.get_managed_singleton("app.CharacterManager"):call("get_ManualPlayer")
+    return p and p:get_address()
+end
+local function newborn_copy(address)
+    if not address or address == 0 or address == player_address() then return false end
+    local ok, id = pcall(function() return sdk.to_managed_object(address):call("get_CharaID") end)
+    return ok and id == ARISEN
+end
+
 local td = sdk.find_type_definition("app.ItemManager")
 for _, m in ipairs(td and td:get_methods() or {}) do
     local name = m:get_name()
@@ -53,9 +74,11 @@ for _, m in ipairs(td and td:get_methods() or {}) do
             sdk.hook(m, function(args)
                 skipped = false
                 local set = clone_addresses()
-                if not set then return end
+                local born = creating()
+                if not set and not born then return end
                 for _, i in ipairs(slots) do
-                    if set[sdk.to_int64(args[i])] then
+                    local a = sdk.to_int64(args[i])
+                    if (set and set[a]) or (born and newborn_copy(a)) then
                         skipped = true
                         M.counts[name] = (M.counts[name] or 0) + 1
                         M.total = M.total + 1

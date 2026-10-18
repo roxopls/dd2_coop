@@ -60,6 +60,20 @@ function M.capture(ch)
             appearance_id = number(appearance) and appearance or nil,
             equipped = read_bool(ch, "get_IsEquip" .. name .. "Weapon") }
     end
+    -- skills equipadas na vocação atual (slot, ID e nível): sem elas a cópia segurava o botão de
+    -- skill e não fazia nada
+    pcall(function()
+        local hu = ch:call("get_Human")
+        local sc, job = hu:call("get_SkillContext"), hu:call("get_JobContext"):call("get_Job")
+        local skills = {}
+        for slot = 0, 5 do
+            local id = sc:call("getSkillID", job, slot)
+            if number(id) and id ~= 0 then
+                skills[#skills + 1] = { slot = slot, id = id, level = sc:call("getCustomSkillLevel", id) }
+            end
+        end
+        p.skills = skills
+    end)
     return p
 end
 
@@ -106,6 +120,15 @@ function M.validate(raw)
         if w and w.equipped ~= nil then
             if type(w.equipped) ~= "boolean" then return nil, "estado de arma invalido" end
             p.weapons[side].equipped = w.equipped
+        end
+    end
+    if raw.skills ~= nil then
+        if type(raw.skills) ~= "table" or #raw.skills > 6 then return nil, "skills invalidas" end
+        p.skills = {}
+        for _, s in ipairs(raw.skills) do
+            if type(s) ~= "table" or not integer(s.slot, 0, 5) or not integer(s.id, 1, 65535) or
+                not integer(s.level, 0, 15) then return nil, "skill invalida" end
+            p.skills[#p.skills + 1] = { slot = s.slot, id = s.id, level = s.level }
         end
     end
     return p

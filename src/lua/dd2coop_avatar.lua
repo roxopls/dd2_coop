@@ -242,6 +242,44 @@ local function apply_ops(ops)
     return n
 end
 
+-- MetaData do avatar (estilos de corpo e roupa) no contexto de montagem: clone da MetaData
+-- (objeto novo do próprio jogo) com os valores do avatar, entregue com set_Meta. Gravar dentro
+-- da MetaData que já estava no contexto fazia o jogo crashar ao criar a cópia ou ao abrir o
+-- menu (coletor do jogo, 2026-10-18); HumanPartSwapper.restore depois da montagem só troca a
+-- roupa (cabelo, pele e gênero ficavam os genéricos).
+local function plan_meta(ctx, human)
+    local mf = human and human.f and human.f._Meta and human.f._Meta.f
+    if type(mf) ~= "table" then return nil, "human._Meta ausente" end
+    local td = sdk.find_type_definition("app.CharacterEditDefine.MetaData")
+    local values = {}
+    for name, v in pairs(mf) do
+        local f = find_field(td, name)
+        if not f or not is_scalar(f:get_type()) then return nil, "human._Meta." .. name .. ": campo invalido" end
+        if not uint32(v) then return nil, "human._Meta." .. name .. ": valor invalido" end
+        values[name] = v
+    end
+    if not ctx:get_type_definition():get_method("set_Meta") then return nil, "PartSwapHumanContext sem set_Meta" end
+    return values
+end
+
+local function apply_meta(ctx, values)
+    local old = ctx:call("get_Meta")
+    local det = old:call("clone")
+    if not det then error("clone da MetaData falhou") end
+    -- a montagem pode já ter guardado o ponteiro da MetaData antiga sem contar referência: depois
+    -- do set_Meta ela era liberada e a montagem usava o objeto morto ~1 s depois (crash em
+    -- DD2.exe+0x524feb4 em parte das criações, 2026-10-18). Fica viva para sempre (um objeto
+    -- pequeno por cópia criada).
+    if old.add_ref_permanent then old:add_ref_permanent() else old:add_ref() end
+    det:add_ref()
+    local ok, err = pcall(function()
+        for name, v in pairs(values) do det:set_field(name, v) end
+        ctx:call("set_Meta", det)
+    end)
+    det:release()
+    if not ok then error(err) end
+end
+
 -- contexts: tabela human/body/pretender/face/detail da copia; original: app.Character
 function M.apply_to(contexts, original, data)
     local foreign = {}
@@ -249,10 +287,18 @@ function M.apply_to(contexts, original, data)
     local ops = {}
     for _, k in ipairs(CONTEXTS) do
         if not contexts[k] then return false, "contexto da copia ausente: " .. k end
-        local ok, why = plan(contexts[k], data.contexts[k], ops, foreign, k)
-        if not ok then return false, why end
+        -- human (MetaData) não passa pelo plan: vai inteira por plan_meta/apply_meta
+        if k ~= "human" then
+            local ok, why = plan(contexts[k], data.contexts[k], ops, foreign, k)
+            if not ok then return false, why end
+        end
     end
-    return true, apply_ops(ops)
+    local meta, why = plan_meta(contexts.human, data.contexts.human)
+    if not meta then return false, why end
+    local n = apply_ops(ops)
+    apply_meta(contexts.human, meta)
+    for _ in pairs(meta) do n = n + 1 end
+    return true, n
 end
 
 -- diferencas entre o arquivo e um personagem vivo (campos escalares, cores e EditValues)

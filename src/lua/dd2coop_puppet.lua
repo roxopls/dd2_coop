@@ -1,8 +1,8 @@
 -- DD2 Co-op: jogador 2, sessao local e recuperacao apos reset de scripts.
 --
 -- O jogador 2 é um segundo Arisen gerado pelo app.GenerateManager:
---   categoria 0 (Arisen), CharacterID 2891076981 (ch000000_00), IDs createGeneratorID /
---   createUniqueID com um GUID novo, safeRequestCreateInstance(container).
+--   categoria 0 (Arisen), CharacterID proprio por dd2coop_replica_id (fallback ch000000_00),
+--   IDs nativos NoUsePool com GUID novo, HumanInfo copiado antes de safeRequestCreateInstance.
 -- Ele nasce com a lógica completa de player (PlayerInputProcessor, app.Player): mesmo
 -- corpo, mesma passada, mesmas ações. Efeitos colaterais tratados aqui:
 --   * ele vira o CharacterManager.ManualPlayer e leva a câmera: o original é devolvido
@@ -13,7 +13,7 @@
 --   * nasce sem equipamento e com outro cabelo: recebe os estilos do player
 --     (PartSwapper.restore(MetaData, VisorSwitch) + requestSwap).
 -- Save: enquanto ele existir, os pedidos de save são barrados (SaveDataManager.requestSave*
--- e MainFlowManager.requestSaveGameData). Ele usa o mesmo CharacterID do player.
+-- e MainFlowManager.requestSaveGameData), inclusive com CharacterID proprio.
 --
 -- Espelho por input (teste do jogador remoto sem rede): o estado do controle do player
 -- (app.UserInput: flags de botão, analógicos, gatilhos) é gravado a cada frame depois do
@@ -125,6 +125,15 @@ local function spawn()
         if party then party.send_away() end
         st.info = "aguardando os pawns sairem; tente de novo em alguns segundos"; return false
     end
+    -- CharacterID próprio (dd2coop_replica_id): inventário e status separados do jogador. Se a
+    -- preparação do ID falhar, a cópia nasce com o ID do Arisen, como antes.
+    local R = _G.dd2coop_replica_id
+    local spawn_id = ARISEN_ID
+    local own_id = R and R.id_for(1)
+    if own_id and not R.failed(own_id) then
+        if not R.ensure(own_id) then st.info = "preparando o ID proprio da copia"; return false end
+        spawn_id = own_id
+    end
     st.orig = p:add_ref()
     st.avatar_applied = false -- dd2coop_avatar marca true se aplicar o avatar antes da montagem
     st.state = "gerando" -- block saves BEFORE requesting any generated object
@@ -132,8 +141,8 @@ local function spawn()
     if not remember() then st.state = "recuperacao"; st.info = "falha ao registrar a sessao"; return end
     write_net_cfg("off")
     local guid = sdk.find_type_definition("System.Guid"):get_method("NewGuid"):call(nil)
-    local GM, m_gen = gm_method("createGeneratorID", 2, "System.Guid")
-    local _, m_uid = gm_method("createUniqueID", 2, "System.Guid")
+    local GM, m_gen = gm_method("createGeneratorIDNoUsePool", 2, "System.Guid")
+    local _, m_uid = gm_method("createUniqueIDNoUsePool", 2, "System.Guid")
     local _, m_box = gm_method("getPoolGenerateInfoContainerForCharacter", 9)
     local _, m_new = gm_method("safeRequestCreateInstance", 3)
     local xf = p:call("get_GameObject"):call("get_Transform")
@@ -142,8 +151,12 @@ local function spawn()
     local up = xf:call("get_UniversalPosition")
     up.x = up.x + fwd.x * 3.0
     up.z = up.z + fwd.z * 3.0
-    local c = m_box:call(GM, m_gen:call(GM, guid, 0), m_uid:call(GM, guid, 0), up, rot,
-        Vector3f.new(1, 1, 1), ARISEN_CATEGORY, 0, ARISEN_ID, 2)
+    local gen = m_gen:call(GM, guid, 0)
+    if R then R.retain_generation_id(gen) elseif gen then gen:add_ref() end
+    local uid = m_uid:call(GM, guid, 0)
+    if R then R.retain_generation_id(uid) elseif uid then uid:add_ref() end
+    local c = m_box:call(GM, gen, uid, up, rot,
+        Vector3f.new(1, 1, 1), ARISEN_CATEGORY, 0, spawn_id, 2)
     if c == nil then st.state = "nenhum"; remember(); write_net_cfg("off"); st.info = "container nao criado"; return end
     -- referência permanente: add_ref() é solta no reset de scripts e o container liberado deixava a
     -- cópia viva apontando para memória morta (crash ~40 s depois de um reset, 2026-10-17)
@@ -151,6 +164,15 @@ local function spawn()
     st.container = c
     st.state = "gerando"
     st.guard_until = os.time() + 15
+    if R then
+        local ok, err = R.prepare_container(c)
+        if not ok then
+            st.state, st.info = "recuperacao", "falha ao preparar a copia: " .. tostring(err)
+            remember(); write_net_cfg("off")
+            return false
+        end
+    end
+    if spawn_id ~= ARISEN_ID then R.arm_classification(spawn_id) end
     local r = m_new:call(GM, c, nil, nil)
     st.info = "geracao pedida (" .. tostring(r) .. ")"
     log.info("[dd2coop] jogador 2: " .. st.info)
@@ -171,11 +193,8 @@ local function settle()
         if tc == nil or tc:get_address() ~= orig:get_address() then
             mcc:call("registerTargetObject", orig:call("get_GameObject"))
         end
-        -- a câmera também passa a ler o controle da cópia: o amigo girava a câmera do host
-        -- (2026-10-17). set_UserInput (método do jogo, nunca set_field) devolve o do jogador;
-        -- switchUserInput voltava para a cópia, não usar.
-        local mi, ui = orig:call("get_Input"), mcc:call("get_UserInput")
-        if mi and (ui == nil or ui:get_address() ~= mi:get_address()) then mcc:call("set_UserInput", mi) end
+        -- NÃO chamar mcc:set_UserInput aqui: crashava a criação da cópia ou minutos depois
+        -- (2026-10-18). O controle da câmera é protegido no dd2coop_camera.lua.
     end
     if clone and (st.source_idx or 1) == 1 then
         pcall(function() clone:call("get_InputProcessor"):call("set_IsEnable", false) end)
@@ -201,7 +220,10 @@ local function scan_arisen()
     for i = 0, all:call("get_Count") - 1 do
         local ch = all:call("get_Item", i)
         -- as cópias dos jogadores 3 e 4 (dd2coop_extra) não entram na recuperação do jogador 2
-        if ch and ch:call("get_CharaID") == ARISEN_ID and not (_G.dd2coop_extra and _G.dd2coop_extra.owns(ch)) then
+        local id = ch and ch:call("get_CharaID")
+        local R = _G.dd2coop_replica_id
+        -- o original (Arisen) e a cópia do jogador 2, que pode ter o ID próprio
+        if ch and (id == ARISEN_ID or (R and R.is_replica(id))) and not (_G.dd2coop_extra and _G.dd2coop_extra.owns(ch)) then
             found[#found + 1] = ch
         end
     end
@@ -230,10 +252,19 @@ local function adopt(orig, clone, restored)
         hit:call("set_IsNoDie", true)
         hit:call("set_IsInvincible", true)
     end)
+    -- stamina: segue a do jogador remoto (dd2coop_world, vitals.st); até lá, cheia e sem consumo
+    pcall(function()
+        local sm = clone:call("get_StaminaManager")
+        sm:call("set_IsEnableConsume", false)
+        sm:call("recoverAll")
+    end)
     pcall(function() clone:call("get_GameObject"):call("set_DrawSelf", not st.hidden) end)
     st.drawn = nil -- visibilidade automatica (conectado) reavalia
     st.guard_until = os.time() + 15
     pcall(settle)
+    -- ID próprio: o calculador de status dele só liga depois da adoção (dd2coop_replica_id)
+    local R = _G.dd2coop_replica_id
+    if R and R.is_replica(clone:call("get_CharaID")) then R.bind(clone) end
     -- com avatar aplicado na montagem, a roupa ja veio do arquivo; nao sobrescrever com a do original
     if not restored and not st.avatar_applied then dress() end
     remember()
@@ -256,9 +287,10 @@ recover = function()
         local uncertain = same and saved_session.phase ~= "nenhum" and saved_session.original ~= nil
         -- recarga do save (morte -> menu -> carregar) destrói a cópia e recria o jogador: se o
         -- único Arisen vivo é o do controle e não é a cópia registrada, a sessão recomeça do zero
-        -- (a cópia nunca fica sozinha no controle sem ser a do registro)
+        -- e o jogador tambem tem identidade nova; sumir apenas a copia nao libera o save
         if uncertain and saved_session.phase == "pronto" and saved_session.clone ~= nil and
-            key(found[1]) ~= saved_session.clone and key(found[1]) == key(manual) then
+            key(found[1]) ~= saved_session.clone and key(found[1]) ~= saved_session.original and
+            key(found[1]) == key(manual) then
             st.state, st.orig, st.clone, st.source_idx, cfg.mirror = "nenhum", nil, nil, 1, false
             remember()
             write_net_cfg("off")

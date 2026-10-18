@@ -89,8 +89,27 @@ local function my_vitals()
     local carry = false -- agarrando/carregando alguém (diagnóstico do carregar o outro jogador)
     pcall(function() carry = p:call("get_CatchController"):call("get_IsActive") == true end)
     local R = _G.dd2coop_revive
+    -- fração de stamina (0..1): a cópia deste jogador no mundo do outro cansa junto
+    local st = nil
+    pcall(function()
+        local sm = p:call("get_StaminaManager")
+        local max = sm:call("get_MaxValue")
+        if max and max > 0 then st = math.max(0, math.min(1, sm:call("get_RemainingAmount") / max)) end
+    end)
     return { t = "vitals", dead = b("get_IsDead") or b("get_IsFallDead"), hp = p:call("get_Hp"), carry = carry,
-        down = R and R.downed or false }
+        down = R and R.downed or false, st = st }
+end
+
+-- stamina da cópia segue a do jogador dela: consumo próprio desligado (o status da cópia é o do
+-- nível 1 e acabava antes do jogador real) e restante = fração recebida × máximo da cópia
+function M.set_copy_stamina(clone, ratio)
+    if not clone then return end
+    local sm = clone:call("get_StaminaManager")
+    if not sm then return end
+    sm:call("set_IsEnableConsume", false)
+    if type(ratio) == "number" and ratio == ratio and ratio >= 0 and ratio <= 1 then
+        sm:call("setRemainingAmount", ratio * sm:call("get_MaxValue"))
+    end
 end
 
 local function publish(peer, host)
@@ -129,10 +148,9 @@ local function apply(data, follow_world, sender)
                 s.remote_dead = msg.dead == true
                 log.info("[dd2coop_world] amigo " .. (s.remote_dead and "morreu: jogador 2 escondido" or "voltou: jogador 2 visivel"))
             end
-            if _G.dd2coop_revive then
-                local clone = (not sender or sender == main or sender == "0") and P and P.clone or (X and X.clone_of(sender))
-                _G.dd2coop_revive.on_vitals(sender or "0", msg, clone)
-            end
+            local clone = (not sender or sender == main or sender == "0") and P and P.clone or (X and X.clone_of(sender))
+            if _G.dd2coop_revive then _G.dd2coop_revive.on_vitals(sender or "0", msg, clone) end
+            if msg.st ~= nil then pcall(M.set_copy_stamina, clone, msg.st) end
             if M.remote_carry ~= (msg.carry == true) then
                 M.remote_carry = msg.carry == true
                 log.info("[dd2coop_world] amigo " .. (M.remote_carry and "agarrou/carrega algo" or "soltou"))

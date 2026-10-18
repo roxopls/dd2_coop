@@ -50,7 +50,18 @@ local function enum_has(name, value)
     end
     return false
 end
-local function fail(message) M.pending=nil; M.message=message; log.info("[dd2coop_loadout] "..message) end
+local function fail(message)
+    local p=M.pending
+    -- a cópia ficou visível durante a preparação: o dono dela volta a decidir (drawn=nil reaplica)
+    if p and p.shown then
+        if p.target then
+            for _,s in ipairs((_G.dd2coop_extra or {}).slots or {}) do
+                if s.clone and key(s.clone)==key(p.target) then s.drawn=nil end
+            end
+        elseif _G.dd2coop_p2 then _G.dd2coop_p2.drawn=nil end
+    end
+    M.pending=nil; M.message=message; log.info("[dd2coop_loadout] "..message)
+end
 function M.apply(raw, target)
     if M.pending then M.message="preparacao em andamento"; return false end
     local p,why = _G.dd2coop_profiles.validate(raw)
@@ -101,6 +112,10 @@ local function advance()
         fail("original mudou durante a preparacao; operacao interrompida"); return
     end
     if M.frame-pending.started>600 then fail("preparacao nao confirmada; confira os logs"); return end
+    -- requestEquipWeapon não equipa com a cópia invisível (DrawSelf=false, 2026-10-18): visível
+    -- durante a preparação; no fim o dono da cópia (puppet/extra) reavalia a visibilidade
+    pcall(function() ctx.clone:call("get_GameObject"):call("set_DrawSelf",true) end)
+    pending.shown=true
     local p=pending.profile
     if pending.stage=="job" then
         -- o JobContext da copia pode nascer ja com o job do save (CharacterID compartilhado);
@@ -122,8 +137,24 @@ local function advance()
             if slot:call("get_WeaponID")~=id or (id~=0 and not slot:call("get_Weapon")) then return end
         end
         if profiles.capture(ctx.clone).vocation~=p.vocation then return end
+        -- skills equipadas do perfil, na vocação da cópia (SkillContext dela, nunca o do original)
+        local skills="sem skills no perfil"
+        if p.skills and #p.skills>0 then
+            local ok,err=pcall(function()
+                local csc=ctx.clone:call("get_Human"):call("get_SkillContext")
+                local osc=ctx.original:call("get_Human"):call("get_SkillContext")
+                if not csc or key(csc)==key(osc) then error("SkillContext compartilhado ou ausente") end
+                local job,n=ctx.job:call("get_Job"),0
+                for _,s in ipairs(p.skills) do
+                    csc:call("setCustomSkillEnable(app.HumanCustomSkillID, app.HumanCustomSkillLevelNo)",s.id,s.level)
+                    if csc:call("setSkill",job,s.id,s.slot)==true then n=n+1 end
+                end
+                skills=n.."/"..#p.skills.." skills"
+            end)
+            if not ok then skills="skills nao aplicadas: "..tostring(err) end
+        end
         -- Appearance overrides are not physical inventory/stat replication.
-        fail("vocacao e objetos das armas confirmados na copia; confira a aparencia")
+        fail("vocacao, armas e "..skills.." confirmados na copia")
     end
 end
 re.on_pre_application_entry("LateUpdateBehavior",function()
@@ -139,7 +170,7 @@ re.on_draw_ui(function()
     if profiles and profiles.imported then
         if imgui.button("Aplicar vocacao e armas do perfil a copia parada") then M.apply(profiles.imported) end
     else imgui.text("Carregue um perfil no painel perfil e roupa.") end
-    imgui.text("Inventario, melhorias de armas e skills customizadas nao sao copiados.")
+    imgui.text("Inventario e melhorias de armas nao sao copiados.")
     if M.message~="" then imgui.text(M.message) end
     imgui.tree_pop()
 end)
