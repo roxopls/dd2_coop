@@ -38,13 +38,18 @@ local function in_game()
     return cm and cm:call("get_ManualPlayer")
 end
 
--- algum pawn (CharaKind 2) ainda na lista de personagens?
-local function pawns_in_world()
+-- algum pawn DO GRUPO (CharaKind 2 com CharaID em SavedPartyPawnList, que continua cheia com os
+-- pawns descarregados) ainda na lista de personagens? Pawns soltos de outros jogadores perto
+-- (ch111000/ch111001) não contam: com eles por perto a cópia nunca nascia (2026-10-17).
+local function pawns_in_world(pm)
+    local ids = {}
+    local saved = pm:call("get_SavedPartyPawnList")
+    for i = 0, (saved and saved:call("get_Count") or 0) - 1 do ids[tostring(saved:call("get_Item", i))] = true end
     local list = sdk.get_managed_singleton("app.CharacterListHolder"):call("getAllCharacters")
     for i = 0, (list and list:call("get_Count") or 0) - 1 do
         local ch = list:call("get_Item", i)
         local ok, kind = pcall(function() return ch:call("get_Context"):call("get_CharaKind") end)
-        if ok and kind == 2 then return true end
+        if ok and kind == 2 and ids[tostring(ch:call("get_CharaID"))] then return true end
     end
     return false
 end
@@ -57,7 +62,7 @@ function M.away()
     local pm = sdk.get_managed_singleton("app.PawnManager")
     if not pm then return false end
     local gone = (pm:call("get_IsStandbyUnload") or pm:call("get_PartyPawnList"):call("get_Count") == 0)
-        and not pawns_in_world()
+        and not pawns_in_world(pm)
     if not gone then M.clear_since = nil; return false end
     M.clear_since = M.clear_since or os.clock()
     return os.clock() - M.clear_since >= AWAY_SETTLE
