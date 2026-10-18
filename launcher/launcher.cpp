@@ -14,10 +14,10 @@
 //    DD2Coop.zip, confere com DD2Coop.zip.sha256 e instala por cima (scripts dd2coop_*.lua
 //    antigos são apagados antes, para não sobrar script renomeado/removido). Arquivos de
 //    estado do mod em reframework\data ficam.
-// 6. Abre o jogo pela Steam e espera ele fechar. Versão (mod e REFramework) que rodou 10 min
-//    ou fechou sem crash vira "boa". Crash (reframework_crash.dmp novo ou CrashReport.exe aberto)
-//    antes disso com versão ainda não boa: volta para a última boa e marca a nova como ruim
-//    (não reinstala até sair outra).
+// 6. Abre o jogo pela Steam e espera ele fechar. REFramework que rodou 10 min ou fechou sem
+//    crash vira "bom". Crash (reframework_crash.dmp novo ou CrashReport.exe aberto) antes disso
+//    com REFramework ainda não bom: volta para o último bom e marca o novo como ruim (não
+//    reinstala até a Release pedir outro). O mod nunca volta: fica sempre na última Release.
 // Sem internet ou sem Release: abre o jogo com o que já está instalado.
 
 #include <windows.h>
@@ -193,7 +193,7 @@ Kv parse_kv(const std::string& text) {
 }
 
 // estado em %APPDATA%\DD2Coop\launcher.ini (UTF-8):
-//   game=<pasta>, mod=<tag instalada>, mod_good=, mod_bad=, ref_url=, ref_sha=, ref_good_url=,
+//   game=<pasta>, mod=<tag instalada>, mod_good= (só registro), ref_url=, ref_sha=, ref_good_url=,
 //   ref_good_sha=, ref_bad=
 std::wstring config_dir() {
     wchar_t* app = nullptr;
@@ -530,17 +530,11 @@ void after_game(const std::wstring& game, Kv& st, ULONGLONG launched) {
         save_state(st);
         return;
     }
-    const bool mod_new = !st["mod"].empty() && st["mod"] != st["mod_good"];
+    // só o REFramework volta. O mod fica sempre na última Release: voltar o mod depois de um
+    // crash levou da v0.6.3 para a v0.6.1 e perdeu as correções (2026-10-17).
     const bool ref_new = !st["ref_sha"].empty() && st["ref_sha"] != st["ref_good_sha"];
-    if (!mod_new && !ref_new) return;  // crash com versão que já funcionou: não é da atualização
+    if (!ref_new) return;  // crash com REFramework que já funcionou: não é da atualização
     std::wstring done, err;
-    if (mod_new && !st["mod_good"].empty()) {
-        std::string rel;
-        if (get_release("tags/" + st["mod_good"], rel) && install_mod(game, rel, err)) {
-            done += L"\nmod: " + widen(st["mod"]) + L" -> " + widen(st["mod_good"]);
-            st["mod_bad"] = st["mod"], st["mod"] = st["mod_good"];
-        }
-    }
     if (ref_new && !st["ref_good_sha"].empty() &&
         install_reframework(game, st["ref_good_url"], st["ref_good_sha"], false, err)) {
         done += L"\nREFramework voltou para a versao anterior";
@@ -548,10 +542,10 @@ void after_game(const std::wstring& game, Kv& st, ULONGLONG launched) {
     }
     save_state(st);
     if (!done.empty()) {
-        message(L"O jogo crashou logo depois da atualizacao. Voltei para a versao que funcionava:" + done +
-            L"\n\nA versao nova nao sera instalada de novo ate sair outra.", MB_ICONWARNING);
+        message(L"O jogo crashou logo depois da atualizacao do REFramework." + done +
+            L"\n\nEssa versao do REFramework nao sera instalada de novo ate a Release pedir outra.", MB_ICONWARNING);
     } else {
-        message(L"O jogo crashou logo depois da atualizacao e nao ha versao anterior conhecida para voltar." +
+        message(L"O jogo crashou logo depois da atualizacao do REFramework e nao ha versao anterior conhecida para voltar." +
             (err.empty() ? std::wstring() : L"\n" + err), MB_ICONWARNING);
     }
 }
@@ -607,7 +601,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR cmd_line, int) {
     const std::string tag = online ? json_str(release, "tag_name") : std::string();
     std::string have = installed_mod(game);
     if (!have.empty() && st["mod"] != have) { st["mod"] = have; save_state(st); }
-    if (!tag.empty() && tag != have && tag != st["mod_bad"]) {
+    if (!tag.empty() && tag != have) {
         if (install_mod(game, release, err)) {
             st["mod"] = tag;
             save_state(st);
