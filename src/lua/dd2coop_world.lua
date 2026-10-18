@@ -121,6 +121,8 @@ local function publish(peer, host)
     if v then data.msgs[#data.msgs + 1] = v end
     local R = _G.dd2coop_revive
     for _, m in ipairs(R and R.outgoing() or {}) do data.msgs[#data.msgs + 1] = m end
+    local DT = _G.dd2coop_death
+    for _, m in ipairs(DT and DT.outgoing() or {}) do data.msgs[#data.msgs + 1] = m end
     if host then -- so o host manda no mundo
         data.msgs[#data.msgs + 1] = { t = "time", day = d, hour = h, minute = mi }
         data.msgs[#data.msgs + 1] = { t = "weather", w = wm:call("get_NowWeatherEnum") }
@@ -158,6 +160,9 @@ local function apply(data, follow_world, sender)
         elseif msg.t == "revive" then
             local S = _G.dd2coop_session
             if _G.dd2coop_revive then _G.dd2coop_revive.on_revive(sender, msg, S and S.status and S.status.me) end
+        elseif msg.t == "rift" then
+            -- outro jogador tocou numa Pedra de Fenda: quem está morto revive ao lado dela
+            if _G.dd2coop_death then _G.dd2coop_death.on_rift(sender, msg) end
         elseif not follow_world then
             -- host: horario/clima/quests do cliente nao valem aqui
         elseif msg.t == "time" and type(msg.day) == "number" and type(msg.hour) == "number" and type(msg.minute) == "number" then
