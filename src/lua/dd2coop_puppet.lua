@@ -140,7 +140,10 @@ local function spawn()
     local c = m_box:call(GM, m_gen:call(GM, guid, 0), m_uid:call(GM, guid, 0), up, rot,
         Vector3f.new(1, 1, 1), ARISEN_CATEGORY, 0, ARISEN_ID, 2)
     if c == nil then st.state = "nenhum"; remember(); write_net_cfg("off"); st.info = "container nao criado"; return end
-    st.container = c:add_ref()
+    -- referência permanente: add_ref() é solta no reset de scripts e o container liberado deixava a
+    -- cópia viva apontando para memória morta (crash ~40 s depois de um reset, 2026-10-17)
+    if c.add_ref_permanent then c:add_ref_permanent() else c:add_ref() end
+    st.container = c
     st.state = "gerando"
     st.guard_until = os.time() + 15
     local r = m_new:call(GM, c, nil, nil)
@@ -606,7 +609,8 @@ re.on_pre_application_entry("LateUpdateBehavior", function()
     if st.state == "pronto" and st.clone then
         local live = st.source_idx == 2 or (mode ~= nil and st.net_status ~= nil and
             (st.net_status.input_state == "active" or st.net_status.input_state == "buffering"))
-        local visible = live and not st.hidden and not st.remote_dead -- amigo morto: escondido
+        local parked = _G.dd2coop_park and _G.dd2coop_park.is_parked("p2") -- longe: dd2coop_park esconde
+        local visible = live and not st.hidden and not st.remote_dead and not parked -- amigo morto: escondido
         if visible ~= st.drawn then
             st.drawn = visible
             pcall(function() st.clone:call("get_GameObject"):call("set_DrawSelf", visible) end)

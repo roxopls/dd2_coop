@@ -118,6 +118,38 @@ do
     end
 end
 
+-- Calculador de status do Arisen: a cópia nascendo chama PlayerStatusCalculator.setup/setContexts
+-- e o calculador passa a ler o Human e os contextos dela (inventário com limite 35 e vida 500 do
+-- nível 1). Trocar o campo Human depois à mão (set_field) bagunçava a contagem de referências e
+-- crashava na criação e no menu (DD2.exe+0x524feb4/+0x52345ae, 2026-10-17). Aqui as chamadas são
+-- puladas enquanto uma cópia está sendo criada ou o controle está nela; o jogo cuida das refs.
+do
+    local td = sdk.find_type_definition("app.PlayerStatusCalculator")
+    for _, m in ipairs(td and td:get_methods() or {}) do
+        local name = m:get_name()
+        if name == "setup" or name == "setContexts" then
+            sdk.hook(m, function(args)
+                local P, X = _G.dd2coop_p2, _G.dd2coop_extra
+                local creating = (P and P.state == "gerando") or (X and X.busy)
+                if not creating then
+                    local set = clone_addresses()
+                    if set then
+                        local ok, man = pcall(function()
+                            return sdk.get_managed_singleton("app.CharacterManager"):call("get_ManualPlayer")
+                        end)
+                        creating = ok and man ~= nil and set[man:get_address()] == true
+                    end
+                end
+                if creating then
+                    M.counts.calcSkip = (M.counts.calcSkip or 0) + 1
+                    return sdk.PreHookResult.SKIP_ORIGINAL
+                end
+            end, function(r) return r end)
+            M.hooks = M.hooks + 1
+        end
+    end
+end
+
 -- Peso: com a cópia no mundo o ItemManager.getWeightLimit do Arisen (por Character ou por
 -- CharacterID) passa a ler o status da cópia (nível 1: limite 35 em vez de 61,65) e o jogador
 -- fica sobrecarregado (2026-10-17). Enquanto houver cópia, devolve o limite do jogador guardado
@@ -198,12 +230,10 @@ do
         local calc = calculator()
         if calc and (calc:get_field("Human") ~= hu or
                 calc:get_field("Param"):get_field("Status") ~= hu:call("get_StatusContext")) then
-            -- set_field grava o ponteiro sem contar referência: o jogo depois solta o Human do campo
-            -- (ao abrir o menu) e, sem esta referência a mais, soltava o do jogador uma vez a mais
-            -- (crash em DD2.exe+0x52345ae, lock dec no contador e cabeçalho já liberado, 2026-10-17).
-            -- O Human antigo (da cópia) fica com uma referência a mais: vazamento pequeno e seguro.
-            if hu.add_ref_permanent then hu:add_ref_permanent() else hu:add_ref() end
-            calc:set_field("Human", hu)
+            -- setContexts (método do jogo) já aponta calc.Human para o Human do jogador, com as
+            -- referências contadas. NUNCA gravar o campo Human com set_field: sem contar a referência,
+            -- o próprio setContexts soltava o ponteiro gravado à mão e o jogo crashava na criação e no
+            -- menu (DD2.exe+0x524feb4/+0x52345ae: soltura de objeto já liberado, 2026-10-17).
             calc:call("setContexts(app.ContextHolder)", me:call("get_Context"))
             M.counts.calculator = (M.counts.calculator or 0) + 1
         end
@@ -212,7 +242,8 @@ do
     M.fix_refs = function(me) return pcall(fix_refs, me) end
     local function my_max(me)
         local calc = fix_refs(me)
-        if calc then return calc:call("calcMaxHPWithEquipmentAndBuff()") end
+        -- só se o calculador for do jogador (com o da cópia daria a vida do nível 1)
+        if calc and calc:get_field("Human") == me:call("get_Human") then return calc:call("calcMaxHPWithEquipmentAndBuff()") end
         local hu = me:call("get_Human")
         return hu:call("get_StatusContext"):call("calcMaxHp", hu:call("get_JobContext"):get_field("CurrentJob"))
     end

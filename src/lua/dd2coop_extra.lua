@@ -110,7 +110,9 @@ local function spawn(slot)
     local c = m_box:call(GM, m_gen:call(GM, guid, 0), m_uid:call(GM, guid, 0), up, rot,
         Vector3f.new(1, 1, 1), 0, 0, ARISEN_ID, 2)
     if c == nil then A.next_build = nil; slot.info = "container nao criado"; return false end
-    slot.container = c:add_ref() -- vivo enquanto a cópia existir (ver cabeçalho)
+    -- vivo enquanto a cópia existir (ver cabeçalho); permanente: add_ref() é solta no reset de scripts
+    if c.add_ref_permanent then c:add_ref_permanent() else c:add_ref() end
+    slot.container = c
     slot.before, slot.started, slot.state = before, M.frame, "gerando"
     slot.profile = bundle.profile
     m_new:call(GM, c, nil, nil)
@@ -162,10 +164,15 @@ end
 local function visibility(slot, status)
     if slot.state ~= "pronto" or not slot.clone then return end
     local live = false
+    slot.remote_pose = nil
     for _, s in ipairs(status and status.slots or {}) do
-        if s.peer == slot.peer then live = s.input_state == "active" or s.input_state == "buffering" end
+        if s.peer == slot.peer then
+            live = s.input_state == "active" or s.input_state == "buffering"
+            if live and s.remote_valid then slot.remote_pose = { s.rx, s.ry, s.rz } end -- dd2coop_park
+        end
     end
-    local show = live and not slot.remote_dead and slot.active
+    local parked = _G.dd2coop_park and _G.dd2coop_park.is_parked("x:" .. tostring(slot.peer)) -- longe
+    local show = live and not slot.remote_dead and slot.active and not parked
     if slot.drawn ~= show then
         slot.drawn = show
         pcall(function() slot.clone:call("get_GameObject"):call("set_DrawSelf", show) end)
