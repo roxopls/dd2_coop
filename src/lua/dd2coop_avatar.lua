@@ -230,8 +230,11 @@ local function new_edit_array(list)
         local ev = keep(sdk.create_instance(EDIT_T, true))
         ev:set_field("_EditKeyHash", kv[1])
         ev:set_field("_Value", kv[2])
-        -- sempre pelo SetValue do jogo (referência contada), não pela atribuição do Lua
-        arr:call("SetValue(System.Object, System.Int32)", ev, i - 1)
+        -- SetValue(System.Object, Int32) não grava o elemento (v0.6.5: "falha ao preencher" e crash
+        -- logo depois); a atribuição do Lua funciona
+        if not pcall(function() arr[i - 1] = ev end) then
+            arr:call("SetValue(System.Object, System.Int32)", ev, i - 1)
+        end
         local back = arr:call("Get", i - 1)
         if not back or back:get_address() ~= ev:get_address() then error("falha ao preencher EditValue[" .. (i - 1) .. "]") end
     end
