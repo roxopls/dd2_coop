@@ -3,9 +3,9 @@
 -- BodyDetail) para reframework/data/dd2coop_avatar.json. Com "aplicar na proxima criacao"
 -- ligado, o pre-hook de CharacterEditManager.requestBuildFromContext escreve o arquivo
 -- nos contextos da copia que esta nascendo (estado "gerando", GameObject diferente do
--- original), uma unica vez. Valores de corpo/rosto viram EditValue NOVOS; nenhum objeto
--- do original e escrito nem compartilhado (a aplicacao aborta antes de escrever se algum
--- alvo pertencer ao original). Tatuagens/cicatrizes: os 10 SlotData de cada sao escritos
+-- original), uma unica vez. Valores de corpo/rosto vao para os EditValue que a copia ja tem,
+-- por setEditValue do jogo (nenhum objeto criado); nenhum objeto do original e escrito (a
+-- aplicacao aborta antes de escrever se algum alvo pertencer ao original). Tatuagens/cicatrizes: os 10 SlotData de cada sao escritos
 -- no lugar, nos slots da propria copia.
 local M = { version = 1, armed = false, message = "", last = nil, verify = nil, frame = 0 }
 _G.dd2coop_avatar = M
@@ -191,9 +191,17 @@ local function plan(o, node, ops, foreign, path)
                     return false, path .. "." .. name .. ": EditValue invalido"
                 end
             end
-            local setter = "set_" .. name:gsub("^_", "")
-            if not td:get_method(setter) then return false, path .. "." .. name .. ": sem " .. setter end
-            ops[#ops + 1] = { kind = "edit", o = o, name = name, setter = setter, v = v.e, path = path .. "." .. name }
+            -- valores gravados no array que a cópia já tem, por setEditValue(hash, valor) do jogo; ele
+            -- não pode ser do original (mudaria a aparência dele)
+            if not td:get_method("setEditValue") then return false, path .. "." .. name .. ": sem setEditValue" end
+            local cur = o:get_field(name)
+            if not cur then return false, path .. "." .. name .. ": nulo na copia" end
+            if foreign[cur:get_address()] then return false, path .. "." .. name .. ": array pertence ao original" end
+            for i = 0, cur:call("get_Length") - 1 do
+                local e = cur:call("Get", i)
+                if e and foreign[e:get_address()] then return false, path .. "." .. name .. ": EditValue pertence ao original" end
+            end
+            ops[#ops + 1] = { kind = "edit", o = o, name = name, v = v.e, path = path .. "." .. name }
         elseif v.a then
             -- slots da propria copia, escritos no lugar; o tamanho tem de bater
             if tname(ft):sub(-2) ~= "[]" or type(v.a) ~= "table" then return false, path .. "." .. name .. ": nao e array" end
@@ -218,36 +226,16 @@ local function plan(o, node, ops, foreign, path)
     return true
 end
 
-local function keep(obj)
-    if obj.add_ref_permanent then obj:add_ref_permanent() else obj:add_ref() end
-    return obj
-end
-
--- array novo de EditValue novos (nada do original e reaproveitado)
-local function new_edit_array(list)
-    local arr = keep(sdk.create_managed_array(EDIT_T, #list))
-    for i, kv in ipairs(list) do
-        local ev = keep(sdk.create_instance(EDIT_T, true))
-        ev:set_field("_EditKeyHash", kv[1])
-        ev:set_field("_Value", kv[2])
-        -- sempre pelo SetValue do jogo (referência contada), não pela atribuição do Lua
-        arr:call("SetValue(System.Object, System.Int32)", ev, i - 1)
-        local back = arr:call("Get", i - 1)
-        if not back or back:get_address() ~= ev:get_address() then error("falha ao preencher EditValue[" .. (i - 1) .. "]") end
-    end
-    return arr
-end
-
 local function apply_ops(ops)
     local n = 0
     for _, op in ipairs(ops) do
         if op.kind == "scalar" then op.o:set_field(op.name, op.v)
         elseif op.kind == "color" then op.o:write_dword(op.off, op.v)
         else
-            -- array novo pelo setter do jogo (set_EditValues). Gravar o array com set_field não
-            -- contava a referência: o coletor do jogo achava objeto liberado e os dois PCs crashavam
-            -- 7 a 17 s depois da cópia nascer (DD2.exe+0x5236168/+0x52345ae, 2026-10-17).
-            op.o:call(op.setter, new_edit_array(op.v))
+            -- NUNCA criar objetos (create_instance/create_managed_array) para a cópia: array e
+            -- EditValue novos, gravados por set_field ou por set_EditValues, faziam o coletor do jogo
+            -- achar objeto liberado ~1 s depois (DD2.exe+0x524feb4/+0x5236168/+0x52345ae, 2026-10-17)
+            for _, kv in ipairs(op.v) do op.o:call("setEditValue", kv[1], kv[2]) end
         end
         n = n + 1
     end
