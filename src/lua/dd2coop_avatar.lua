@@ -191,7 +191,9 @@ local function plan(o, node, ops, foreign, path)
                     return false, path .. "." .. name .. ": EditValue invalido"
                 end
             end
-            ops[#ops + 1] = { kind = "edit", o = o, name = name, v = v.e, path = path .. "." .. name }
+            local setter = "set_" .. name:gsub("^_", "")
+            if not td:get_method(setter) then return false, path .. "." .. name .. ": sem " .. setter end
+            ops[#ops + 1] = { kind = "edit", o = o, name = name, setter = setter, v = v.e, path = path .. "." .. name }
         elseif v.a then
             -- slots da propria copia, escritos no lugar; o tamanho tem de bater
             if tname(ft):sub(-2) ~= "[]" or type(v.a) ~= "table" then return false, path .. "." .. name .. ": nao e array" end
@@ -228,9 +230,8 @@ local function new_edit_array(list)
         local ev = keep(sdk.create_instance(EDIT_T, true))
         ev:set_field("_EditKeyHash", kv[1])
         ev:set_field("_Value", kv[2])
-        if not pcall(function() arr[i - 1] = ev end) then
-            arr:call("SetValue(System.Object, System.Int32)", ev, i - 1)
-        end
+        -- sempre pelo SetValue do jogo (referência contada), não pela atribuição do Lua
+        arr:call("SetValue(System.Object, System.Int32)", ev, i - 1)
         local back = arr:call("Get", i - 1)
         if not back or back:get_address() ~= ev:get_address() then error("falha ao preencher EditValue[" .. (i - 1) .. "]") end
     end
@@ -242,7 +243,12 @@ local function apply_ops(ops)
     for _, op in ipairs(ops) do
         if op.kind == "scalar" then op.o:set_field(op.name, op.v)
         elseif op.kind == "color" then op.o:write_dword(op.off, op.v)
-        else op.o:set_field(op.name, new_edit_array(op.v)) end
+        else
+            -- array novo pelo setter do jogo (set_EditValues). Gravar o array com set_field não
+            -- contava a referência: o coletor do jogo achava objeto liberado e os dois PCs crashavam
+            -- 7 a 17 s depois da cópia nascer (DD2.exe+0x5236168/+0x52345ae, 2026-10-17).
+            op.o:call(op.setter, new_edit_array(op.v))
+        end
         n = n + 1
     end
     return n
