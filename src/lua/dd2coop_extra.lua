@@ -80,6 +80,11 @@ local function settle(orig)
         if tc == nil or tc:get_address() ~= orig:get_address() then
             mcc:call("registerTargetObject", orig:call("get_GameObject"))
         end
+        -- a câmera também passa a ler o controle da cópia: o amigo girava a câmera do host
+        -- (2026-10-17). set_UserInput (método do jogo, nunca set_field) devolve o do jogador;
+        -- switchUserInput voltava para a cópia, não usar.
+        local mi, ui = orig:call("get_Input"), mcc:call("get_UserInput")
+        if mi and (ui == nil or ui:get_address() ~= mi:get_address()) then mcc:call("set_UserInput", mi) end
     end
 end
 
