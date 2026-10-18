@@ -1,5 +1,5 @@
 -- DD2 Co-op: sem pawns enquanto há outro jogador na sessão ou alguma cópia Arisen no mundo.
--- Com par na sessão: PawnManager.standbyPartyPawn(true, ...) descarrega os pawns do grupo (o
+-- Com par na sessão: PawnManager.standbyPartyPawn(true, false, true, 0) descarrega os pawns do grupo (o
 -- mesmo "esperar" que o jogo usa em quests). Sem par e sem cópia: comebackPartyPawn(posição,
 -- rotação) os traz ao lado do jogador. (comebackPartyPawn(false) com os pawns descarregados
 -- crashou em InstanceInfoController.autoDestroyCharaInstance.)
@@ -67,7 +67,9 @@ local function send_away()
     local pm = sdk.get_managed_singleton("app.PawnManager")
     if not pm or pm:call("get_IsStandby") then return end
     if pm:call("get_PartyPawnList"):call("get_Count") == 0 then return end
-    pm:call(STANDBY, true, false, false, 0)
+    -- 3º argumento true: descarrega na hora (some da CharacterListHolder em ~4 s); com false eles
+    -- saem andando e só somem ~85 s depois. (true, true, false) os traz de volta: não usar.
+    pm:call(STANDBY, true, false, true, 0)
     mark(true)
     log.info("[dd2coop_party] pawns descarregados")
 end
