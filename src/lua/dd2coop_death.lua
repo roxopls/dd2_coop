@@ -96,6 +96,24 @@ end
 -- guardada a cada ~1 s, e o reviver sempre leva o jogador para a última: morto por inimigo, é
 -- praticamente onde caiu; numa queda, é a beira de onde caiu; na água, o último ponto seco.
 local DEEP_WATER = 0.8 -- m de profundidade a partir da qual a posição não é guardada
+local CALM_RADIUS = 40  -- m sem inimigo vivo: a posição também vale como "lugar calmo" (derrota do grupo)
+
+-- inimigos vivos (mesma regra do dd2coop_enemies: tudo que não é Arisen, humano, pawn ou 32)
+local SKIP_KIND = { [0] = true, [1] = true, [2] = true, [32] = true }
+local function enemies_near(pos, radius)
+    local out = {}
+    local list = sdk.get_managed_singleton("app.CharacterListHolder"):call("getAllCharacters")
+    for i = 0, (list and list:call("get_Count") or 0) - 1 do
+        local ch = list:call("get_Item", i)
+        local ok, near = pcall(function()
+            if SKIP_KIND[ch:call("get_Context"):call("get_CharaKind")] or ch:call("get_IsDead") then return false end
+            local q = ch:call("get_GameObject"):call("get_Transform"):call("get_UniversalPosition")
+            return (q.x - pos.x) ^ 2 + (q.y - pos.y) ^ 2 + (q.z - pos.z) ^ 2 <= radius * radius
+        end)
+        if ok and near then out[#out + 1] = ch end
+    end
+    return out
+end
 
 local function track_safe(p)
     if p:call("get_IsDead") or not p:call("get_IsGround") then return end
@@ -103,6 +121,9 @@ local function track_safe(p)
     if water and water:call("get_IsDetected") and (water:call("get_WaterDepth") or 0) > DEEP_WATER then return end
     local xf = p:call("get_GameObject"):call("get_Transform")
     M.safe_pos, M.safe_rot = xf:call("get_UniversalPosition"), xf:call("get_Rotation")
+    if #enemies_near(M.safe_pos, CALM_RADIUS) == 0 then
+        M.calm_pos = { M.safe_pos.x, M.safe_pos.y, M.safe_pos.z }
+    end
 end
 
 local function warp_to_safe(p)
@@ -114,7 +135,8 @@ local function warp_to_safe(p)
         pos.x, pos.y, pos.z = M.revive_at[1] + 1.5, M.revive_at[2], M.revive_at[3] + 1.5
         M.revive_at = nil
         p:call("warp(via.Position, via.Quaternion, app.CharacterWarpOption)", pos, xf:call("get_Rotation"), opt)
-        log.info("[dd2coop_death] revivido ao lado da Pedra de Fenda")
+        log.info("[dd2coop_death] revivido " .. (M.revive_label or "ao lado da Pedra de Fenda"))
+        M.revive_label = nil
         return true
     end
     if not M.safe_pos then return false end
@@ -127,6 +149,13 @@ end
 -- cópias passam do limite do grupo e o jogo crasha). RimStoneManager.RequestOpenRimStone(gimmick) é
 -- pulado (devolve false: a pedra não abre, nada é travado e o jogador fica livre, testado em
 -- 2026-10-18) e, no lugar, os outros jogadores recebem {t="rift"} com a posição da pedra.
+local LAST_RIFT = "dd2coop_last_rift.json"
+do
+    local ok, r = pcall(json.load_file, LAST_RIFT)
+    if ok and type(r) == "table" and type(r.x) == "number" and type(r.y) == "number" and type(r.z) == "number" then
+        M.last_rift = { r.x, r.y, r.z }
+    end
+end
 M.out = {}
 function M.outgoing()
     local o = M.out
@@ -141,16 +170,22 @@ do
         sdk.hook(m, function(args)
             local s = thread.get_hook_storage()
             s.dd2coop_rift = nil
-            if not in_session() then return end
-            s.dd2coop_rift = true
+            -- a última pedra tocada vale sempre (com ou sem sessão) e sobrevive a fechar o jogo:
+            -- é o ponto da derrota do grupo
+            local pos
             pcall(function()
                 local gm = sdk.to_managed_object(args[3])
-                local pos = gm:call("get_GameObject"):call("get_Transform"):call("get_UniversalPosition")
-                M.out[#M.out + 1] = { t = "rift", x = pos.x, y = pos.y, z = pos.z, id = os.time() }
+                pos = gm:call("get_GameObject"):call("get_Transform"):call("get_UniversalPosition")
                 M.last_rift = { pos.x, pos.y, pos.z }
+                pcall(json.dump_file, LAST_RIFT, { x = pos.x, y = pos.y, z = pos.z })
+            end)
+            if not in_session() then return end
+            s.dd2coop_rift = true
+            if pos then
+                M.out[#M.out + 1] = { t = "rift", x = pos.x, y = pos.y, z = pos.z, id = os.time() }
                 if _G.dd2coop_world then _G.dd2coop_world.urgent = true end
                 log.info("[dd2coop_death] Pedra de Fenda tocada: aliados mortos revivem aqui")
-            end)
+            end
             return sdk.PreHookResult.SKIP_ORIGINAL
         end, function(ret)
             local s = thread.get_hook_storage()
@@ -160,6 +195,82 @@ do
     else
         M.message = "RimStoneManager.RequestOpenRimStone nao encontrado"
     end
+end
+
+-- Derrota do grupo: com todos mortos ninguém toca uma Pedra de Fenda. O host, morto e vendo todos os
+-- outros mortos (remote_dead, da mensagem de vida) por WIPE_DELAY s, manda {t="wipe"} com um ponto:
+-- a última Pedra de Fenda tocada, ou o último lugar seguro do host. Cada jogador vê a tela "O grupo
+-- caiu", revive pela Vitalita e vai para lá; a sessão continua conectada.
+local WIPE_DELAY, WIPE_SCREEN = 3, 4
+local WIPE_HEAL_RADIUS = 80 -- m em volta de onde o grupo caiu: inimigos voltam com a vida cheia
+M.test_wipe = false -- teste sozinho: age como host de uma sessão em que todos estão mortos
+
+local function peer_dead(sid)
+    local P = _G.dd2coop_p2
+    if P and P.get_peer and P.get_peer() == sid then return P.remote_dead == true end
+    for _, s in ipairs((_G.dd2coop_extra or {}).slots or {}) do
+        if s.peer == sid then return s.remote_dead == true end
+    end
+    return false
+end
+
+local function is_host()
+    if M.test_wipe then return true end
+    local S = _G.dd2coop_session
+    return S and S.status and S.status.role == "host" or false
+end
+
+local function everyone_dead()
+    if not M.dead then return false end
+    if M.test_wipe then return true end
+    local S = _G.dd2coop_session
+    local peers = S and S.peers or {}
+    if #peers == 0 then return false end
+    for _, sid in ipairs(peers) do
+        if not peer_dead(sid) then return false end
+    end
+    return true
+end
+
+-- todos os jogadores (host incluído) recebem: tela, reviver e ponto de volta
+function M.on_wipe(sender, msg)
+    if type(msg.x) ~= "number" or type(msg.y) ~= "number" or type(msg.z) ~= "number" then return end
+    M.wipe_screen_until = os.clock() + WIPE_SCREEN
+    M.wipe_text = msg.rift == true and "Voltando para a ultima Pedra de Fenda..." or "Voltando para o ultimo lugar seguro..."
+    log.info("[dd2coop_death] derrota do grupo: todos voltam ao ponto")
+    if not M.dead then return end
+    M.revive_at = { msg.x, msg.y, msg.z }
+    M.revive_label = msg.rift == true and "ao lado da Pedra de Fenda" or "no ponto da derrota do grupo"
+    local ok, why = M.revive()
+    if not ok then M.revive_at = nil; M.message = "reviver na derrota: " .. tostring(why) end
+end
+
+local function check_wipe()
+    if not is_host() or not everyone_dead() then M.all_dead_since = nil; return end
+    M.all_dead_since = M.all_dead_since or os.clock()
+    if os.clock() - M.all_dead_since < WIPE_DELAY or M.wipe_pending then return end
+    -- ponto: última Pedra de Fenda; senão o último lugar calmo (sem inimigo a CALM_RADIUS m); só
+    -- em último caso o último lugar seguro (ficava no meio da luta, 2026-10-18)
+    local point, rift = M.last_rift, M.last_rift ~= nil
+    if not point then point = M.calm_pos end
+    if not point and M.safe_pos then point = { M.safe_pos.x, M.safe_pos.y, M.safe_pos.z } end
+    if not point then return end
+    M.wipe_pending = true
+    -- os inimigos da luta em que o grupo caiu voltam com a vida cheia (o host é o dono do mundo;
+    -- dd2coop_enemies leva a vida para os clientes)
+    pcall(function()
+        local p = player()
+        local here = p:call("get_GameObject"):call("get_Transform"):call("get_UniversalPosition")
+        local n = 0
+        for _, e in ipairs(enemies_near(here, WIPE_HEAL_RADIUS)) do
+            if pcall(function() e:call("get_Hit"):call("recoverHpAndMaxHpCompletely(System.Boolean)", false) end) then n = n + 1 end
+        end
+        log.info("[dd2coop_death] derrota do grupo: " .. n .. " inimigos com a vida cheia")
+    end)
+    local msg = { t = "wipe", x = point[1], y = point[2], z = point[3], rift = rift, id = os.time() }
+    M.out[#M.out + 1] = msg
+    if _G.dd2coop_world then _G.dd2coop_world.urgent = true end
+    M.on_wipe("host", msg)
 end
 
 -- outro jogador tocou numa Pedra de Fenda
@@ -206,6 +317,7 @@ local frame = 0
 re.on_pre_application_entry("LateUpdateBehavior", function()
     frame = frame + 1
     if not M.dead then
+        M.all_dead_since, M.wipe_pending = nil, nil
         if M.target then pcall(stop_spectating) end
         if frame % 60 == 0 then
             local ok, err = pcall(function()
@@ -229,6 +341,7 @@ re.on_pre_application_entry("LateUpdateBehavior", function()
     end
     if frame % 15 ~= 0 then return end
     local ok, err = pcall(function()
+        check_wipe()
         local p = player()
         if p and not p:call("get_IsDead") then
             M.dead = false
@@ -264,6 +377,19 @@ re.on_draw_ui(function()
     end
     if M.message ~= "" then imgui.text(M.message) end
     imgui.tree_pop()
+end)
+
+-- tela da derrota do grupo, por cima do jogo enquanto todos voltam ao ponto
+re.on_frame(function()
+    if not M.wipe_screen_until or os.clock() > M.wipe_screen_until then return end
+    pcall(function()
+        local w, h = 1920, 1080
+        local ok, size = pcall(imgui.get_display_size)
+        if ok and size then w, h = size.x, size.y end
+        draw.filled_rect(0, 0, w, h, 0xFF000000)
+        draw.text("O grupo caiu", w * 0.5 - 60, h * 0.5 - 20, 0xFFFFFFFF)
+        draw.text(M.wipe_text or "Voltando...", w * 0.5 - 170, h * 0.5 + 6, 0xFFAAAAAA)
+    end)
 end)
 
 log.info("[dd2coop_death] morte em sessao carregada")

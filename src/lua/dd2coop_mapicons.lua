@@ -41,6 +41,26 @@ local function players()
     return out
 end
 
+-- Som de morte do minimapa: ui020301.callDeadSe toca o som contínuo de "alguém do grupo morreu" (só
+-- se [ui+0x320] estiver desligado, e liga), e o jogo chama stopDeadSe a cada atualização em que não
+-- acha pawn morto (300 vezes em 3 s, medido em 2026-10-18). Com algum jogador morto, o som é
+-- disparado uma vez e o stopDeadSe do jogo é pulado; quando ninguém mais está morto, ele volta a
+-- valer e o som para.
+M.any_dead = false
+local function dead_sound(ui, any)
+    if any and not M.any_dead then pcall(function() ui:call("callDeadSe") end) end
+    M.any_dead = any
+end
+do
+    local td = sdk.find_type_definition("app.ui020301")
+    local m = td and td:get_method("stopDeadSe")
+    if m then
+        sdk.hook(m, function(args)
+            if M.any_dead then return sdk.PreHookResult.SKIP_ORIGINAL end
+        end, function(r) return r end)
+    end
+end
+
 local function update(ui)
     local arr = ui:get_field("PawnIconList")
     if not arr then return end
@@ -48,6 +68,9 @@ local function update(ui)
     if not me then return end
     local base = ui:call("getIconPos", me:call("get_GameObject"):call("get_Transform"):call("get_Position"))
     local list = players()
+    local any = false
+    for _, p in ipairs(list) do any = any or p.dead end
+    dead_sound(ui, any)
     local k, shown = 1, 0
     for i = 0, arr:get_size() - 1 do
         local icon = arr:get_element(i)
@@ -61,12 +84,18 @@ local function update(ui)
                 pnl:call("set_Position", Vector3f.new(at.x - base.x, at.y - base.y, 0))
                 pnl:call("set_Rotation", ui:call("getIconRot", yaw_of(xf:call("get_Rotation"))))
                 icon:call("setMatPos", ui:get_field(p.dead and "PawnDeadTexPos" or "PawnTexPos"))
+                -- morte como a de um pawn: o update do ícone troca o estado do painel (DEFAULT ->
+                -- death_wait, com caveira e onda) quando IsDead muda
+                icon:set_field("IsDead", p.dead == true)
+                pcall(function() icon:call("update(System.String, System.Single, System.Single)", "DEFAULT", 1.0, 1.0) end)
                 icon:call("set_Visible", true)
                 used[i] = true
                 shown = shown + 1
             elseif used[i] then
                 -- ícone que era de uma cópia: some e volta à textura normal para um pawn
                 icon:call("setMatPos", ui:get_field("PawnTexPos"))
+                icon:set_field("IsDead", false)
+                pcall(function() icon:call("update(System.String, System.Single, System.Single)", "DEFAULT", 1.0, 1.0) end)
                 icon:call("set_Visible", false)
                 used[i] = nil
             end

@@ -163,6 +163,9 @@ local function apply(data, follow_world, sender)
         elseif msg.t == "rift" then
             -- outro jogador tocou numa Pedra de Fenda: quem está morto revive ao lado dela
             if _G.dd2coop_death then _G.dd2coop_death.on_rift(sender, msg) end
+        elseif msg.t == "wipe" then
+            -- todos caíram: o host manda todos de volta ao mesmo ponto
+            if _G.dd2coop_death then _G.dd2coop_death.on_wipe(sender, msg) end
         elseif not follow_world then
             -- host: horario/clima/quests do cliente nao valem aqui
         elseif msg.t == "time" and type(msg.day) == "number" and type(msg.hour) == "number" and type(msg.minute) == "number" then
