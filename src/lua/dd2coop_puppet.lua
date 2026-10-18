@@ -38,6 +38,8 @@ local cfg = {
     jitter = 6,
     peer = "",
     snap_dist = 1.5,
+    smooth_correction = true,
+    echo_correction = false,
 }
 
 local SETTINGS, REGISTRY = "dd2coop_settings.json", "dd2coop_session.json"
@@ -55,10 +57,13 @@ local saved_cfg = load_json(SETTINGS) or {}
 cfg.delay = bounded(saved_cfg.delay, cfg.delay, 1, 120, true)
 cfg.jitter = bounded(saved_cfg.jitter, cfg.jitter, 1, 60, true)
 cfg.snap_dist = bounded(saved_cfg.snap_dist, cfg.snap_dist, 0.3, 6, false)
+if type(saved_cfg.smooth_correction) == "boolean" then cfg.smooth_correction = saved_cfg.smooth_correction end
+if type(saved_cfg.echo_correction) == "boolean" then cfg.echo_correction = saved_cfg.echo_correction end
 if type(saved_cfg.peer) == "string" then cfg.peer = saved_cfg.peer:sub(1, 32):gsub("%s", "") end
 local function save_settings()
     return pcall(json.dump_file, SETTINGS, { version = 1, peer = cfg.peer,
-        delay = cfg.delay, jitter = cfg.jitter, snap_dist = cfg.snap_dist })
+        delay = cfg.delay, jitter = cfg.jitter, snap_dist = cfg.snap_dist,
+        smooth_correction = cfg.smooth_correction, echo_correction = cfg.echo_correction })
 end
 local saved_session = load_json(REGISTRY) or {}
 
@@ -467,6 +472,8 @@ write_net_cfg = function(mode)
         c.jitter = cfg.jitter
         c.peer = cfg.peer
         c.snap = cfg.snap_dist
+        c.smooth_correction = cfg.smooth_correction
+        c.echo_correction = cfg.echo_correction
         pcall(function()
             c.orig_xf = st.orig:call("get_GameObject"):call("get_Transform"):get_address()
             c.clone_xf = st.clone:call("get_GameObject"):call("get_Transform"):get_address()
@@ -646,11 +653,19 @@ st.draw_net_panel = function()
             imgui.text(string.format("rede (%s): enviados=%s recebidos=%s aplicados=%s repetidos=%s ruins=%s buffer=%s",
                 tostring(s.mode), tostring(s.sent), tostring(s.received), tostring(s.applied),
                 tostring(s.held), tostring(s.bad), tostring(s.buffered)))
-            if st.source_idx == 4 then
+            if st.source_idx == 3 then
+                local changed, value = imgui.checkbox("Eco com correcao de posicao (teste)", cfg.echo_correction)
+                if changed then cfg.echo_correction = value; save_settings() end
+            end
+            if st.source_idx == 4 or (st.source_idx == 3 and cfg.echo_correction) then
                 imgui.text(string.format("pose do amigo: %s  deriva=%.2f m  reposicionamentos=%s",
                     s.remote_valid and "recebida" or "ainda nao", tonumber(s.drift) or -1, tostring(s.snaps)))
-                local cs, sd = imgui.slider_float("Reposicionar acima de (m)", cfg.snap_dist, 0.3, 6)
-                if cs then cfg.snap_dist = sd; save_settings() end
+                local changed, value = imgui.checkbox("Correcao suave pelo movimento", cfg.smooth_correction)
+                if changed then cfg.smooth_correction = value; save_settings() end
+                if not cfg.smooth_correction then
+                    local cs, sd = imgui.slider_float("Reposicionar acima de (m)", cfg.snap_dist, 0.3, 6)
+                    if cs then cfg.snap_dist = sd; save_settings() end
+                end
             end
             if s.error and s.error ~= "" then imgui.text("erro: " .. s.error) end
         else

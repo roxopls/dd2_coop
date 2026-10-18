@@ -9,7 +9,29 @@ struct TestInput {
     float stick[2] = {};
 };
 void check(bool ok, const char* reason) { if (!ok) throw std::runtime_error(reason); }
-int main() {
+
+namespace {
+struct MotionActor { bool ground = true, jumping = false, carrying = false, caught = false; };
+int motion_warps = 0;
+REFrameworkMethodHandle motion_method(uintptr_t id) { return reinterpret_cast<REFrameworkMethodHandle>(id); }
+REFrameworkResult motion_invoke(REFrameworkMethodHandle method, void* self, void**, unsigned int,
+        void* out, unsigned int) {
+    auto& actor = *static_cast<MotionActor*>(self);
+    switch (reinterpret_cast<uintptr_t>(method)) {
+    case 1: std::memcpy(out, &actor.ground, sizeof(bool)); break;
+    case 2: std::memcpy(out, &actor.jumping, sizeof(bool)); break;
+    case 3: { void* p = &actor.carrying; std::memcpy(out, &p, sizeof(p)); break; }
+    case 4: { void* p = &actor.caught; std::memcpy(out, &p, sizeof(p)); break; }
+    case 5: std::memcpy(out, self, sizeof(bool)); break;
+    case 6: { double p[3]{}; std::memcpy(out, p, sizeof(p)); break; }
+    case 7: { float q[4]{0, 0, 0, 1}; std::memcpy(out, q, sizeof(q)); break; }
+    case 8: ++motion_warps; break;
+    default: throw std::runtime_error("unexpected engine invocation");
+    }
+    return REFRAMEWORK_ERROR_NONE;
+}
+}
+int main() try {
     using namespace net_sync;
     g_lua_ready = true;
     auto field = [](const char* name, uint32_t offset, uint32_t size) {
@@ -171,5 +193,96 @@ int main() {
         check(g_slots[0].received == 1 && g_slots[1].received == 1 && g_slots[0].applied == 1 &&
             g_slots[1].applied == 1, "per-slot counters");
     }
-    std::cout << "real playback, N players and native save guard: all checks passed\n";
+    // Exercise the actual root hook and warp policy with a small engine boundary mock.
+    {
+        REFrameworkTDBMethod methods{};
+        methods.invoke = motion_invoke;
+        REFrameworkSDKData sdk{};
+        sdk.method = &methods;
+        g_sdk = &sdk;
+        g_motion.ready = true;
+        g_motion.ground = motion_method(1); g_motion.jumping = motion_method(2);
+        g_motion.catcher = motion_method(3); g_motion.caught = motion_method(4);
+        g_motion.catch_active = g_motion.caught_active = motion_method(5);
+        g_cam.univ_get = motion_method(6); g_cam.rotation = motion_method(7); g_warp = motion_method(8);
+        g_lua_ready = true; g_cfg.mode = "p2p"; g_cfg.smooth_correction = true;
+        g_slot_count = 1; g_slots[0] = Slot{};
+        auto& s = g_slots[0];
+        MotionActor actor;
+        s.clone_ch = s.clone_xf = reinterpret_cast<uintptr_t>(&actor);
+        s.playing = s.placed = true;
+        s.current.pose = Pose{2, 0, 0, 0, true};
+        correct_clone(s);
+        check(s.correction_x == 2 && motion_warps == 0, "ordinary drift schedules motion, never warp");
+        float root[3]{0, 0.2f, 0};
+        void* argv[4]{nullptr, &actor, root, nullptr};
+        Sleep(20); // let the real plugin clock cover a full simulated frame
+        s.last_root_ms = now_ms() - 16;
+        pre_root_motion(4, argv, nullptr, 0);
+        check(root[0] > 0 && root[0] <= 0.050001f && root[1] == 0.2f && root[2] == 0,
+            "root hook adds bounded horizontal movement and preserves jump height");
+        root[0] = 0;
+        actor.caught = true; // attachment can begin after correction was scheduled
+        s.last_root_ms = now_ms() - 16;
+        pre_root_motion(4, argv, nullptr, 0);
+        check(root[0] == 0, "root hook rechecks catch state before applying correction");
+        s.current.pose.x = 100; s.placed = false;
+        for (auto which : {0, 1, 2, 3}) {
+            actor = MotionActor{};
+            if (which == 0) actor.ground = false;
+            if (which == 1) actor.jumping = true;
+            if (which == 2) actor.carrying = true;
+            if (which == 3) actor.caught = true;
+            correct_clone(s);
+            check(motion_warps == 0 && s.correction_x == 0,
+                "no warp or smooth correction while airborne, jumping, carrying or caught");
+        }
+        actor = MotionActor{};
+        s.current.fields.resize(g_payload_size);
+        size_t offset = 0;
+        for (auto& f : g_fields) {
+            if (std::strcmp(f.name, "ButtonTriggerFlags") == 0) {
+                uint64_t jump = 8; std::memcpy(s.current.fields.data() + offset, &jump, f.size);
+            }
+            offset += f.size;
+        }
+        s.fresh_input = true;
+        correct_clone(s);
+        check(motion_warps == 0 && s.jump_grace_until > GetTickCount64(),
+            "incoming jump edge suppresses warp before engine jump state changes");
+        s.fresh_input = false; s.jump_grace_until = 0;
+        correct_clone(s); correct_clone(s);
+        check(motion_warps == 1 && s.placed, "initial/far placement warps once and uses elapsed-time cooldown");
+        root[0] = 0; s.correction_x = 2; s.last_root_ms = now_ms() - 16;
+        g_cfg.mode = "eco";
+        pre_root_motion(4, argv, nullptr, 0);
+        check(root[0] == 0, "ordinary echo does not enable position correction");
+        g_cfg.echo_correction = true;
+        s.echo_offset = Pose{};
+        s.current.pose = Pose{2, 0, 0, 0, true};
+        correct_clone(s);
+        check(s.echo_offset.x == -2 && s.correction_x == 0 && motion_warps == 1,
+            "corrected echo anchors its offset without overlapping the original");
+        s.current.pose.x = 3;
+        correct_clone(s);
+        check(s.correction_x == 1 && motion_warps == 1, "corrected echo follows motion relative to its anchor");
+        g_cfg.echo_correction = false;
+        g_cfg.mode = "p2p";
+        MotionActor original;
+        argv[1] = &original;
+        pre_root_motion(4, argv, nullptr, 0);
+        check(root[0] == 0, "local player and unrelated actors are never corrected");
+        argv[1] = &actor;
+        s.watchdog.received(GetTickCount64() - 600); s.watchdog.expire(GetTickCount64());
+        pre_root_motion(4, argv, nullptr, 0);
+        check(root[0] == 0, "expired input cannot apply a pending movement correction");
+        s.reset_playback();
+        check(s.correction_x == 0 && s.last_root_ms == 0 && s.jump_grace_until == 0,
+            "session reset discards correction and timing state");
+        g_sdk = nullptr;
+    }
+    std::cout << "real playback, N players, native save guard and root motion: all checks passed\n";
+} catch (const std::exception& error) {
+    std::cerr << "FAIL: " << error.what() << '\n';
+    return 1;
 }

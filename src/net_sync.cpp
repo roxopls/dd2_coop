@@ -30,6 +30,7 @@
 
 #include "net_sync.hpp"
 #include "input_safety.hpp"
+#include "motion_correction.hpp"
 #include "save_io.hpp"
 
 #include <windows.h>
@@ -304,6 +305,8 @@ struct Config {
     double snap_far = 6.0;   // deriva (m) a partir da qual a cópia é teleportada de uma vez
     double nudge = 0.25;     // fração da deriva corrigida por passo (puxar aos poucos)
     int nudge_every = 4;     // quadros entre passos
+    bool smooth_correction = true;
+    bool echo_correction = false; // explicit local test, preserving the clone's initial offset
     int jitter = 6;
     Pose my_pose;         // pose do player escrita pelo Lua (reserva, se orig_xf faltar)
 } g_cfg;
@@ -378,6 +381,10 @@ struct Slot {
     double drift = -1;              // distância entre a cópia e a pose do pacote aplicado
     uint64_t snaps = 0, nudges = 0, warp_fail = 0;
     int last_warp = -1000;          // quadro do último warp
+    double correction_x = 0, correction_z = 0, last_root_ms = 0;
+    uint64_t smooth_steps = 0, correction_suspended = 0;
+    ULONGLONG jump_grace_until = 0, last_hard_warp_ms = 0;
+    Pose echo_offset;
     double play_offset = 0;         // hora local - hora do remetente no ponto de reprodução
     double last_play_ms = 0;
     uint64_t received = 0, applied = 0, held = 0, timeouts = 0, neutralized = 0;
@@ -385,6 +392,9 @@ struct Slot {
     void reset_playback() {
         buffer.clear(); current = Remote{}; playing = false; watchdog = {};
         fresh_input = false; remote_pose = Pose{}; placed = false;
+        correction_x = correction_z = last_root_ms = 0;
+        jump_grace_until = last_hard_warp_ms = 0;
+        echo_offset = Pose{};
     }
 };
 
@@ -587,6 +597,8 @@ void load_config() {
     c.snap_far = json_num(s, "snap_far", 6.0);
     c.nudge = json_num(s, "nudge", 0.25);
     c.nudge_every = static_cast<int>(json_num(s, "nudge_every", 4));
+    c.smooth_correction = json_bool(s, "smooth_correction", true);
+    c.echo_correction = json_bool(s, "echo_correction", false);
     if (c.nudge_every < 1) c.nudge_every = 1;
     c.my_pose.x = json_num(s, "px", 0);
     c.my_pose.y = json_num(s, "py", 0);
@@ -625,6 +637,11 @@ void load_config() {
             g_slot_count = c.peer_count;
         }
         for (int i = 0; i < c.peer_count; ++i) {
+            if (c.echo_correction != g_cfg.echo_correction) {
+                g_slots[i].echo_offset = Pose{};
+                g_slots[i].correction_x = g_slots[i].correction_z = 0;
+                g_slots[i].last_root_ms = 0;
+            }
             g_slots[i].clone_xf = c.peers[i].clone_xf;
             g_slots[i].clone_ch = c.peers[i].clone_ch;
         }
@@ -681,11 +698,13 @@ void write_status() {
         const char* st = slot_state(s, age);
         std::fprintf(f, "%s{\"peer\":\"%llu\",\"input_state\":\"%s\",\"rx_age_ms\":%lld,\"received\":%llu,"
             "\"applied\":%llu,\"held\":%llu,\"buffered\":%zu,\"drift\":%.3f,\"snaps\":%llu,\"nudges\":%llu,\"warp_fail\":%llu,"
-            "\"timeouts\":%llu,\"remote_valid\":%s,\"rx\":%.4f,\"ry\":%.4f,\"rz\":%.4f}",
+            "\"timeouts\":%llu,\"remote_valid\":%s,\"rx\":%.4f,\"ry\":%.4f,\"rz\":%.4f,"
+            "\"smooth_steps\":%llu,\"correction_suspended\":%llu}",
             i ? "," : "", (unsigned long long)s.peer64, st, age, (unsigned long long)s.received,
             (unsigned long long)s.applied, (unsigned long long)s.held, s.buffer.size(), s.drift,
             (unsigned long long)s.snaps, (unsigned long long)s.nudges, (unsigned long long)s.warp_fail, (unsigned long long)s.timeouts,
-            s.remote_pose.valid ? "true" : "false", s.remote_pose.x, s.remote_pose.y, s.remote_pose.z);
+            s.remote_pose.valid ? "true" : "false", s.remote_pose.x, s.remote_pose.y, s.remote_pose.z,
+            (unsigned long long)s.smooth_steps, (unsigned long long)s.correction_suspended);
     }
     std::fprintf(f, "]");
     prof_status(f);
@@ -967,27 +986,141 @@ bool warp_clone(uintptr_t ch, const Pose& pose) {
         REFRAMEWORK_ERROR_NONE;
 }
 
-// P2P: compara a cópia com a pose do jogador DO MESMO PACOTE cujo input ela está executando
-// (o 1º teste comparava com uma pose de até 0,5 s antes, e a defasagem sozinha passava do
-// limite). Repõe na primeira pose e quando a deriva passa de `snap_far` (no máx. 3 por segundo);
-// entre `snap` e `snap_far` puxa aos poucos: a cada `nudge_every` quadros um warp curto que
-// anda `nudge` da deriva (no teste de 2026-10-17 o teleporte inteiro a partir de 1,5 m dava
-// ~0,6 saltos visíveis por segundo).
+struct MotionMethods {
+    REFrameworkMethodHandle ground = nullptr, jumping = nullptr, catcher = nullptr,
+        caught = nullptr, catch_active = nullptr, caught_active = nullptr;
+    bool ready = false;
+} g_motion;
+
+bool invoke_bool(REFrameworkMethodHandle m, void* self, bool& result) {
+    if (!m || !self) return false;
+    alignas(16) uint8_t out[256]{};
+    if (g_sdk->method->invoke(m, self, nullptr, 0, out, sizeof(out)) != REFRAMEWORK_ERROR_NONE) return false;
+    result = out[0] != 0;
+    return true;
+}
+
+bool correction_mode() {
+    return g_cfg.mode == "p2p" || (g_cfg.mode == "eco" && g_cfg.echo_correction);
+}
+
+bool correction_safe(uintptr_t character) {
+    if (!g_motion.ready || !character) return false;
+    auto ch = reinterpret_cast<void*>(character);
+    bool ground = false, jumping = true, carrying = true, caught = true;
+    if (!invoke_bool(g_motion.ground, ch, ground) || !ground ||
+            !invoke_bool(g_motion.jumping, ch, jumping) || jumping) return false;
+    void* catcher = invoke_ptr(g_motion.catcher, ch);
+    void* caught_controller = invoke_ptr(g_motion.caught, ch);
+    return invoke_bool(g_motion.catch_active, catcher, carrying) && !carrying &&
+        invoke_bool(g_motion.caught_active, caught_controller, caught) && !caught;
+}
+
+int pre_root_motion(int argc, void** argv, REFrameworkTypeDefinitionHandle*, unsigned long long) {
+    if (argc < 4 || !argv[2] || !g_lua_ready || !correction_mode() || !g_cfg.smooth_correction)
+        return REFRAMEWORK_HOOK_CALL_ORIGINAL;
+    const auto character = reinterpret_cast<uintptr_t>(argv[1]);
+    for (int i = 0; i < g_slot_count; ++i) {
+        Slot& s = g_slots[i];
+        if (!character || character != s.clone_ch) continue;
+        const double now = now_ms();
+        double dx, dz, elapsed;
+        {
+            std::lock_guard<std::mutex> lk(g_mtx);
+            elapsed = s.last_root_ms > 0 ? (now - s.last_root_ms) / 1000.0 : 0;
+            s.last_root_ms = now;
+            if (!s.playing || s.watchdog.expired() || GetTickCount64() < s.jump_grace_until) break;
+            dx = s.correction_x; dz = s.correction_z;
+        }
+        const auto step = motion_correction::step(dx, dz, elapsed);
+        if ((step.x == 0 && step.z == 0) || !correction_safe(character)) break;
+        float root[3];
+        std::memcpy(root, argv[2], sizeof(root));
+        if (!std::isfinite(root[0]) || !std::isfinite(root[1]) || !std::isfinite(root[2])) break;
+        {
+            std::lock_guard<std::mutex> lk(g_mtx);
+            if (!g_lua_ready || !s.playing || s.watchdog.expired() ||
+                    (s.correction_x == 0 && s.correction_z == 0)) break;
+            root[0] += step.x; root[2] += step.z;
+            std::memcpy(argv[2], root, sizeof(root)); // preserve root height and the quaternion argument
+            ++s.smooth_steps;
+        }
+        break;
+    }
+    return REFRAMEWORK_HOOK_CALL_ORIGINAL;
+}
+
+void resolve_motion() {
+    auto tdb = g_sdk->functions->get_tdb();
+    auto find = [&](const char* type, const char* method) { return g_sdk->tdb->find_method(tdb, type, method); };
+    g_motion.ground = find("app.Character", "get_IsGround");
+    g_motion.jumping = find("app.Character", "get_IsJumpCtrlActive");
+    g_motion.catcher = find("app.Character", "get_CatchController");
+    g_motion.caught = find("app.Character", "get_CaughtController");
+    g_motion.catch_active = find("app.CatchController", "get_IsActive");
+    g_motion.caught_active = find("app.CaughtController", "get_IsActive");
+    auto root = find("app.Character", "onRootApply");
+    if (!root || g_sdk->method->get_num_params(root) != 2 || !g_motion.ground || !g_motion.jumping ||
+            !g_motion.catcher || !g_motion.caught || !g_motion.catch_active || !g_motion.caught_active) {
+        g_ref->log_error("[dd2coop_net] motion methods unavailable; position correction suspended");
+        return;
+    }
+    auto hook = g_sdk->functions->add_hook(root, pre_root_motion, nullptr, false);
+    g_motion.ready = hook != 0;
+    if (!g_motion.ready) g_ref->log_error("[dd2coop_net] root motion hook unavailable; position correction suspended");
+}
+
+bool pending_jump(const Slot& s) {
+    if (!s.fresh_input || s.current.fields.size() != g_payload_size) return false;
+    size_t at = 0;
+    for (const auto& f : g_fields) {
+        if (std::strcmp(f.name, "ButtonTriggerFlags") == 0) {
+            uint64_t flags = 0;
+            std::memcpy(&flags, s.current.fields.data() + at, std::min<size_t>(f.size, sizeof(flags)));
+            return (flags & (uint64_t{1} << 3)) != 0; // reflected CharacterInput.Action.Jump
+        }
+        at += f.size;
+    }
+    return false;
+}
+
+// Track the pose of the SAME packet as the input. Normal drift is corrected in
+// onRootApply, not by short teleports. Warp is reserved for initial/far placement.
 void correct_clone(Slot& s) {
-    if (g_cfg.mode != "p2p" || !s.clone_xf) return;
+    if (!correction_mode() || !s.clone_xf || !g_lua_ready) return;
+    const ULONGLONG now = GetTickCount64();
     Pose target;
     {
         std::lock_guard<std::mutex> lk(g_mtx);
-        if (!s.playing || !s.current.pose.valid) return;
+        s.correction_x = s.correction_z = 0;
+        if (!s.playing || s.watchdog.expired() || !s.current.pose.valid) return;
+        if (pending_jump(s)) s.jump_grace_until = now + 200;
         target = s.current.pose;
     }
     Pose cur;
     if (!read_pose(s.clone_xf, cur)) return;
+    if (g_cfg.mode == "eco") {
+        if (!s.echo_offset.valid) {
+            s.echo_offset = Pose{cur.x - target.x, cur.y - target.y, cur.z - target.z, 0, true};
+            s.placed = true; // never put the echo body on top of the original
+        }
+        target.x += s.echo_offset.x; target.y += s.echo_offset.y; target.z += s.echo_offset.z;
+    }
     double dx = cur.x - target.x, dy = cur.y - target.y, dz = cur.z - target.z;
     s.drift = std::sqrt(dx * dx + dy * dy + dz * dz);
-    if (s.placed && s.drift < g_cfg.snap) return;
+    if (!std::isfinite(s.drift)) return;
+    if (now < s.jump_grace_until || !correction_safe(s.clone_ch)) {
+        ++s.correction_suspended;
+        return;
+    }
     const bool hard = !s.placed || s.drift >= g_cfg.snap_far;
-    if (hard && s.placed && g_frame - s.last_warp < 20) return;
+    if (!hard && g_cfg.smooth_correction) {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        s.correction_x = -dx; s.correction_z = -dz;
+        return;
+    }
+    if (!hard && s.drift < g_cfg.snap) return;
+    if (hard && s.placed && now - s.last_hard_warp_ms < 333) return;
     if (!hard && g_frame - s.last_warp < g_cfg.nudge_every) return;
     Pose to = target;
     if (!hard) {
@@ -998,6 +1131,7 @@ void correct_clone(Slot& s) {
     if (warp_clone(s.clone_ch, to)) {
         s.placed = true;
         s.last_warp = g_frame;
+        if (hard) s.last_hard_warp_ms = now;
         if (hard) ++s.snaps; else ++s.nudges;
     } else if (++s.warp_fail == 1) {
         g_ref->log_error("[dd2coop_net] warp da copia recusado (ch=%llx)", (unsigned long long)s.clone_ch);
@@ -1399,6 +1533,7 @@ void init(const REFrameworkPluginInitializeParam* param) {
     }
     resolve_camera();
     resolve_warp();
+    resolve_motion();
     if (!g_warp) g_ref->log_error("[dd2coop_net] app.Character.warp nao achado; jogador 2 sem reposicao");
     auto tdb = g_sdk->functions->get_tdb();
     auto m = g_sdk->tdb->find_method(tdb, "app.UserInput", "update");

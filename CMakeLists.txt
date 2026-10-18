@@ -20,6 +20,9 @@ if(BUILD_TESTING)
     target_include_directories(net_playback_test PRIVATE src third_party)
     target_link_options(net_playback_test PRIVATE -static -static-libgcc -static-libstdc++)
     add_test(NAME net_playback COMMAND net_playback_test)
+    add_executable(motion_correction_test tests/motion_correction_test.cpp)
+    target_link_options(motion_correction_test PRIVATE -static -static-libgcc -static-libstdc++)
+    add_test(NAME motion_correction COMMAND motion_correction_test)
 endif()
 
 # launcher: baixa/atualiza o mod pela Release do GitHub e abre o jogo
