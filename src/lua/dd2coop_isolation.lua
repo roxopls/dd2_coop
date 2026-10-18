@@ -152,8 +152,9 @@ end
 
 -- Peso: com a cópia no mundo o ItemManager.getWeightLimit do Arisen (por Character ou por
 -- CharacterID) passa a ler o status da cópia (nível 1: limite 35 em vez de 61,65) e o jogador
--- fica sobrecarregado (2026-10-17). Enquanto houver cópia, devolve o limite do jogador guardado
--- de quando não havia cópia.
+-- fica sobrecarregado (2026-10-17). Enquanto houver cópia, devolve o limite do jogador: o guardado
+-- sem cópia (nunca durante a criação: guardar 35 ali deixava o jogador sem correr nem pular) ou o
+-- do calculador quando ele é do jogador.
 do
     local ARISEN_ID = 2891076981
     local td = sdk.find_type_definition("app.ItemManager")
@@ -161,11 +162,25 @@ do
     local frame = 0
     re.on_pre_application_entry("LateUpdateBehavior", function()
         frame = frame + 1
-        if frame % 60 ~= 0 or clone_addresses() then return end
+        if frame % 60 ~= 0 then return end
         pcall(function()
             local me = sdk.get_managed_singleton("app.CharacterManager"):call("get_ManualPlayer")
             local im = sdk.get_managed_singleton("app.ItemManager")
-            if me and im then M.weight_limit = limit_by_char:call(im, me) end
+            if not me or not im then return end
+            -- durante a criação o calculador já pode estar com a cópia (limite 35): não guarda
+            local P, X = _G.dd2coop_p2, _G.dd2coop_extra
+            if (P and P.state ~= "nenhum" and P.state ~= "pronto") or (X and X.busy) then return end
+            if not clone_addresses() then
+                M.weight_limit = limit_by_char:call(im, me)
+                return
+            end
+            -- com cópia: o limite vem do calculador quando ele é do jogador (dd2coop_isolation fix_refs)
+            local cm = sdk.get_managed_singleton("app.CharacterManager")
+            local calc = cm:get_field("<PlayerStatusCalculatorHolder>k__BackingField"):get_field("Calculators")
+                :call("get_Item", ARISEN_ID)
+            if calc and calc:get_field("Human") == me:call("get_Human") then
+                M.weight_limit = calc:call("calcMaxWeightWithBuff()")
+            end
         end)
     end)
     for _, sig in ipairs({ "getWeightLimit(app.Character)", "getWeightLimit(app.CharacterID)" }) do
